@@ -58,6 +58,26 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _parse_power_map(raw: str) -> dict[str, float]:
+    """
+    Přečte příkony topení ve tvaru ``id:W,id:W`` (např. ``fee89300f2a5:3500``).
+
+    Args:
+        raw: Hodnota proměnné prostředí
+
+    Returns:
+        dict[str, float]: Příkon v kW podle ID zařízení; neplatné položky se vynechají
+    """
+    result: dict[str, float] = {}
+    for item in raw.split(","):
+        device, _, watts = item.strip().partition(":")
+        try:
+            result[device.strip()] = float(watts) / 1000
+        except ValueError:
+            continue
+    return {device: kw for device, kw in result.items() if device}
+
+
 class Settings:
     """
     Snímek konfigurace serveru sestavený z proměnných prostředí.
@@ -75,6 +95,10 @@ class Settings:
         rate_limit_enabled:   Zapnutí rate limitu na příkazové endpointy.
         rate_limit_max:       Maximální počet příkazů za okno.
         rate_limit_window_s:  Délka okna v sekundách.
+        history_enabled:      Sběr historie dat do data/history.db.
+        history_poll_s:       Interval odečtu POER termostatů pro historii (s).
+        history_retention_days: Jak dlouho se historie uchovává (dny).
+        poer_power_kw:        Příkon topení podle ID termostatu (odhad kWh v exportu).
     """
 
     def __init__(self) -> None:
@@ -102,6 +126,14 @@ class Settings:
         self.rate_limit_enabled: bool = _env_bool("LG_RATE_LIMIT_ENABLED", True)
         self.rate_limit_max: int = _env_int("LG_RATE_LIMIT_MAX", 30)
         self.rate_limit_window_s: int = _env_int("LG_RATE_LIMIT_WINDOW_S", 60)
+
+        # --- Historie dat ---
+        self.history_enabled: bool = _env_bool("LG_HISTORY_ENABLED", True)
+        self.history_poll_s: int = max(60, _env_int("LG_HISTORY_POLL_S", 300))
+        self.history_retention_days: int = max(1, _env_int("LG_HISTORY_RETENTION_DAYS", 90))
+        self.poer_power_kw: dict[str, float] = _parse_power_map(
+            os.getenv("LG_POER_POWER_W", "")
+        )
 
     @property
     def auth_is_cloudflare(self) -> bool:

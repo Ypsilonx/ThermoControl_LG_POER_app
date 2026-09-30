@@ -47,3 +47,4 @@ dist/
 data/openapi.json
 data/state.json
 data/weather_cache.json
+data/history.db*

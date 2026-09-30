@@ -39,6 +39,7 @@ data/config.json
 data/devices.json
 data/automation_rules.json
 data/schedule.json
+data/history.db*
 .env
 
 # Logové soubory

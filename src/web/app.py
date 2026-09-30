@@ -39,6 +39,8 @@ from thermal_controller import (
 from web.auth import CloudflareAccessMiddleware
 from web.ratelimit import RateLimitMiddleware
 from web.settings import get_settings
+from history.collector import HistoryCollector, parse_lg_push
+from history.store import HistoryStore
 from web.routes.devices import router as devices_router
 from web.routes.control import router as control_router
 from web.routes.ws import router as ws_router, manager as ws_manager
@@ -47,6 +49,7 @@ from web.routes.weather import router as weather_router
 from web.routes.schedule import router as schedule_router
 from web.routes.energy import router as energy_router
 from web.routes.poer import router as poer_router
+from web.routes.history import router as history_router
 
 logger = logging.getLogger(__name__)
 BASE_DIR = Path(__file__).parent
@@ -135,6 +138,29 @@ def _dispatch_schedule_action(
     )
     app.state.background_tasks.add(task)
     task.add_done_callback(app.state.background_tasks.discard)
+
+
+def _create_history_collector() -> HistoryCollector | None:
+    """
+    Vytvoří sběrač historie podle nastavení (LG_HISTORY_*).
+
+    Returns:
+        HistoryCollector | None: Sběrač, nebo None pokud je vypnutý či nejde otevřít DB.
+    """
+    settings = get_settings()
+    if not settings.history_enabled:
+        return None
+    try:
+        store = HistoryStore(BASE_DIR.parent.parent / "data" / "history.db")
+    except Exception as exc:
+        logger.error("❌ Historie: databázi nelze otevřít, sběr vypnut: %s", exc)
+        return None
+    return HistoryCollector(
+        store,
+        os.getenv("LG_POER_API_KEY", "").strip(),
+        poll_seconds=settings.history_poll_s,
+        retention_days=settings.history_retention_days,
+    )
 
 
 AUTOMATION_TICK_SECONDS = 60
@@ -604,6 +630,8 @@ async def _weather_refresh_loop(app: FastAPI) -> None:
                     app.state.weather_cache = result
                     app.state.weather_cache_time = datetime.now(timezone.utc)
                     save_weather_cache(result)
+                    if getattr(app.state, "history", None) is not None:
+                        await app.state.history.record_weather(result)
                     logger.info(
                         "🌤️ Počasí aktualizováno z ČHMÚ meteogram (další za %.0f h)",
                         interval_h,
@@ -658,6 +686,9 @@ async def lifespan(app: FastAPI):
     app.state.arbiter = CommandArbiter()
     app.state.background_tasks = set()
 
+    # Historie dat pro ladění automatiky (data/history.db).
+    app.state.history = _create_history_collector()
+
     # Perzistentní stav PID regulace (watchdog + deduplikace příkazů) mezi tiky.
     app.state.thermal_states = {}
     app.state.thermal_last_signature = {}
@@ -688,16 +719,12 @@ async def lifespan(app: FastAPI):
             else:
                 data = payload if isinstance(payload, dict) else {}
 
-            # Stav zařízení je zabalen v event.push (viz GUI mixin)
-            device_status = data.get("event", {}).get("push", data)
-
-            # Pokus o extrakci device_id z MQTT tématu
-            device_id = None
-            topic_str = str(topic) if topic else ""
-            for dev_id in getattr(app.state, "known_device_ids", set()):
-                if dev_id and dev_id in topic_str:
-                    device_id = dev_id
-                    break
+            # ThinQ Connect posílá {"pushType": "DEVICE_STATUS", "deviceId", "report"}
+            # na společný topic klienta (ověřeno 2026-09-30) – ID není v topicu.
+            known_ids = getattr(app.state, "known_device_ids", set())
+            device_id, device_status = parse_lg_push(topic, data, known_ids)
+            if device_id is None:
+                return
 
             message = {
                 "type": "device_status",
@@ -706,6 +733,11 @@ async def lifespan(app: FastAPI):
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
             asyncio.run_coroutine_threadsafe(ws_manager.broadcast(message), loop)
+            history = getattr(app.state, "history", None)
+            if history is not None:
+                asyncio.run_coroutine_threadsafe(
+                    history.record_lg_status(device_id, device_status), loop
+                )
         except Exception as exc:
             logger.error(f"❌ MQTT→WS bridge chyba: {exc}")
 
@@ -729,6 +761,12 @@ async def lifespan(app: FastAPI):
     weather_task = asyncio.create_task(_weather_refresh_loop(app))
     automation_task = asyncio.create_task(_automation_loop(app))
     mqtt_watchdog_task = asyncio.create_task(_mqtt_watchdog_loop(app, _on_mqtt_message))
+    history_task = None
+    if app.state.history is not None:
+        # Úvodní stav LG čte až úloha sběru – start serveru na LG nečeká.
+        history_task = asyncio.create_task(app.state.history.run(
+            lambda: app.state.api, lambda: list(app.state.known_device_ids)
+        ))
 
     yield
 
@@ -737,6 +775,8 @@ async def lifespan(app: FastAPI):
     weather_task.cancel()
     automation_task.cancel()
     mqtt_watchdog_task.cancel()
+    if history_task is not None:
+        history_task.cancel()
     try:
         await scheduler_task
     except asyncio.CancelledError:
@@ -753,6 +793,13 @@ async def lifespan(app: FastAPI):
         await mqtt_watchdog_task
     except asyncio.CancelledError:
         logger.info("🔧 MQTT watchdog zastaven")
+    if history_task is not None:
+        try:
+            await history_task
+        except asyncio.CancelledError:
+            logger.info("📈 Sběr historie zastaven")
+        # Hranice pro intervaly topení LG – neběží přes dobu, kdy server nejede.
+        await app.state.history.mark_stopped()
     await app.state.arbiter.close()
     logger.info("🔧 Arbitr příkazů ukončen")
 
@@ -806,6 +853,7 @@ app.include_router(weather_router)
 app.include_router(schedule_router)
 app.include_router(energy_router)
 app.include_router(poer_router)
+app.include_router(history_router)
 
 
 # ---------------------------------------------------------------------------
