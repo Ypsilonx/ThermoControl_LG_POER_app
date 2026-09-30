@@ -15,8 +15,7 @@ from env_config import load_local_env
 sys.path.insert(0, str(Path(__file__).parent))
 load_local_env()
 from server_api import get_ac_device_id, get_device_id_by_alias, list_devices
-from command_policy import build_command_plan
-from command_executor import create_payload_for_step, apply_status_hint, execute_plan
+from device_jobs import lg_command_job
 
 def main():
     """Hlavní funkce aplikace"""
@@ -202,14 +201,13 @@ async def cli_execute_command(device_id, command, device_alias=None):
 
         internal_command, internal_args = parse_cli_command(command)
 
-        status = await api.get_device_status(device_id)
-        plan = build_command_plan(internal_command, internal_args, status)
-        if plan.should_skip:
-            print(f"Příkaz přeskočen: {plan.skip_reason}")
-            await api.close()
-            return
+        # CLI je samostatný proces – arbitr web serveru ho koordinovat nemůže,
+        # proto jen stejná úloha (čerstvý stav + command pipeline) bez fronty.
+        outcome = await lg_command_job(api, device_id, internal_command, internal_args)()
+        if not outcome.sent:
+            print(f"Příkaz přeskočen: {outcome.skip_reason}")
 
-        for step_result in await execute_plan(api, device_id, plan, status):
+        for step_result in outcome.steps:
             print(f"Příkaz '{step_result['step']}' úspěšně odeslán: {step_result['result']}")
         
         await api.close()

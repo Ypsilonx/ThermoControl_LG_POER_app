@@ -86,11 +86,12 @@ data/                       # Docker volume — runtime config, NOT committed (e
 
 ### Command execution pipeline
 
-Every device command (from CLI, web control route, or scheduler) flows through the same pipeline:
-1. `command_policy.build_command_plan(command, args, current_status)` — resolves preconditions (e.g. `change_mode` implies `power_on` first) and returns an ordered step plan, or `should_skip=True` with a reason if the command is a no-op or blocked.
-2. `command_executor.execute_plan(api, device_id, plan, status)` — executes each step via `ThinQAPI`, building payloads with `create_payload_for_step` / `klima_logic`.
+Every device command in the web server (web control routes, HAND scheduler, AUTO loop) goes through the **command arbiter**:
+1. The caller builds a job via `device_jobs` (`lg_command_job`, `lg_apply_action_job`, `poer_command_job`) and submits a `CommandRequest(device_key, key, source, job)` to `app.state.arbiter` (`command_arbiter.CommandArbiter`).
+2. The arbiter runs jobs **serially per device**, highest source priority first (`emergency` > `manual`/`override` > `schedule`/`automation`); a pending request with the same `key` is replaced (unless it has higher priority); non-bypass sources are rate-limited per device kind (`DEFAULT_CONFIG` in `command_arbiter.py`).
+3. The job reads fresh device status only when it runs, then uses `command_policy.build_command_plan` (preconditions, e.g. `change_mode` implies `power_on`; no-op → skip) and `command_executor.execute_plan`.
 
-Never bypass this pipeline by calling `ThinQAPI` command methods directly — preconditions (e.g. wind direction axes must be sent as separate commands; ThinQ Connect API doesn't support setting exact louver position) live in `command_policy.py`.
+Never call `execute_plan` / `send_poer_command` directly from web code — that reintroduces command collisions. The CLI is a separate process and runs `lg_command_job` directly (no arbiter). Wind direction axes must still be sent as separate commands; ThinQ Connect API doesn't support setting exact louver position.
 
 ### FastAPI lifespan (`src/web/app.py`)
 
