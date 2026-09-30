@@ -40,6 +40,13 @@ LABEL org.opencontainers.image.title="LG Klimatizace" \
 
 WORKDIR /app
 
+# Časová zóna: slim obraz nemá tzdata, takže TZ=Europe/Prague z docker-compose
+# by se tiše ignorovala a místní čas by byl UTC (posunutý HAND plánovač,
+# hranice dnů v historii a v exportu).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends tzdata \
+    && rm -rf /var/lib/apt/lists/*
+
 # Přebereme hotové virtuální prostředí z builderu.
 # Cesta /app/.venv musí být shodná s builderem (uv používá absolutní cesty).
 COPY --from=builder /app/.venv /app/.venv
