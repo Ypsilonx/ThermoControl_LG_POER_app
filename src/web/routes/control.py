@@ -2,8 +2,8 @@
 """
 Router: Ovládání zařízení (POST /api/devices/{device_id}/command).
 
-Přijme příkaz s volitelnými argumenty, sestaví bezpečný CommandPlan
-přes command_policy a provede ho přes command_executor.
+Přijme příkaz s volitelnými argumenty a předá ho arbitrovi
+příkazů, který ho vykoná přes command_policy → command_executor.
 
 Endpoint záměrně nepřijímá surový ThinQ payload – veškerá validace
 a sestavení probíhá na serveru přes command_policy.build_command_plan.
@@ -15,10 +15,10 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, field_validator
 
-from command_executor import execute_plan
-from command_policy import build_command_plan
-from server_api import ThinQAPI
-from web.routes.devices import _get_api
+from command_arbiter import CommandRequest as ArbiterRequest
+from command_arbiter import CommandSource, CommandSuperseded
+from device_jobs import lg_command_job, lg_device_key
+from web.routes.devices import _get_api, _get_arbiter
 
 logger = logging.getLogger(__name__)
 
@@ -98,10 +98,9 @@ async def send_command(device_id: str, body: CommandRequest, request: Request):
     Odešle příkaz klimatizaci.
 
     Postup:
-        1. Načte aktuální stav zařízení.
-        2. Sestaví CommandPlan přes build_command_plan.
-        3. Pokud plan.should_skip, vrátí ``skipped=True`` bez volání API.
-        4. Jinak provede všechny kroky přes execute_plan.
+        1. Sestaví úlohu ``lg_command_job`` (stav se čte až při spuštění).
+        2. Předá ji arbitrovi se zdrojem MANUAL a počká na výsledek.
+        3. Nic neměnící nebo nahrazený příkaz vrátí jako ``skipped=True``.
 
     Args:
         device_id: ThinQ Device ID
@@ -113,30 +112,26 @@ async def send_command(device_id: str, body: CommandRequest, request: Request):
 
     Raises:
         HTTPException 422: Nepovolený příkaz (Pydantic validace)
-        HTTPException 503: ThinQ API nedostupné
-        HTTPException 400: Chyba při sestavení nebo provedení plánu
+        HTTPException 503: ThinQ API nedostupné nebo selhání příkazu
+        HTTPException 400: Neznámý příkaz v plánu
     """
     api = _get_api(request)
+    job = lg_command_job(api, device_id, body.command, tuple(body.args))
 
     try:
-        status = await api.get_device_status(device_id)
-    except Exception as exc:
-        logger.warning(f"Nelze načíst stav pro command: {exc}")
-        raise HTTPException(status_code=503, detail=f"Nelze načíst stav zařízení: {exc}")
-
-    args = tuple(body.args)
-    plan = build_command_plan(body.command, args, status)
-
-    if plan.should_skip:
-        logger.info(f"Příkaz '{body.command}' přeskočen: {plan.skip_reason}")
-        return CommandResponse(skipped=True, skip_reason=plan.skip_reason, steps=[])
-
-    try:
-        results = await execute_plan(api, device_id, plan, status)
+        outcome = await _get_arbiter(request).submit(ArbiterRequest(
+            lg_device_key(device_id), body.command, CommandSource.MANUAL, job
+        ))
+    except CommandSuperseded as exc:
+        logger.info(f"Příkaz '{body.command}' nahrazen: {exc}")
+        return CommandResponse(skipped=True, skip_reason=str(exc), steps=[])
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
         logger.error(f"Chyba při provádění příkazu '{body.command}': {exc}")
         raise HTTPException(status_code=503, detail=f"Chyba při odesílání příkazu: {exc}")
 
-    return CommandResponse(skipped=False, skip_reason=None, steps=results)
+    if not outcome.sent:
+        logger.info(f"Příkaz '{body.command}' přeskočen: {outcome.skip_reason}")
+        return CommandResponse(skipped=True, skip_reason=outcome.skip_reason, steps=[])
+    return CommandResponse(skipped=False, skip_reason=None, steps=outcome.steps)

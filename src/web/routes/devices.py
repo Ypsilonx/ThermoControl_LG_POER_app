@@ -11,6 +11,7 @@ import logging
 
 from fastapi import APIRouter, HTTPException, Request
 
+from command_arbiter import CommandArbiter
 from server_api import ThinQAPI, list_devices
 
 logger = logging.getLogger(__name__)
@@ -39,6 +40,19 @@ def _get_api(request: Request) -> ThinQAPI:
             detail=f"ThinQ API není dostupné: {error_detail}",
         )
     return api
+
+
+def _get_arbiter(request: Request) -> CommandArbiter:
+    """
+    Vrátí sdíleného arbitra příkazů z app.state.
+
+    Args:
+        request: FastAPI HTTP požadavek
+
+    Returns:
+        CommandArbiter: Arbitr vytvořený v lifespanu aplikace
+    """
+    return request.app.state.arbiter
 
 
 @router.get(

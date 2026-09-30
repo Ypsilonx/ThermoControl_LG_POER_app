@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """Router: POER termostat (stav + základní ovládání).
 
-Endpointy jsou oddělené od LG command pipeline, protože POER používá
-vlastní cloud API a vlastní sadu příkazů.
+POER používá vlastní cloud API a sadu příkazů; příkazy jdou stejně jako
+u LG přes arbitra příkazů.
 """
 
 from __future__ import annotations
@@ -10,10 +10,13 @@ from __future__ import annotations
 import os
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from poer_api import fetch_poer_status_cached, send_poer_command
+from command_arbiter import CommandRequest, CommandSource, CommandSuperseded
+from device_jobs import poer_command_job, poer_device_key
+from poer_api import fetch_poer_status_cached
+from web.routes.devices import _get_arbiter
 from web.routes.weather import _load_weather_config
 
 router = APIRouter(prefix="/api/poer", tags=["POER"])
@@ -60,6 +63,35 @@ def _require_poer_api_key() -> str:
     return api_key
 
 
+async def _submit_poer_command(request: Request, endpoint: str, data: dict) -> dict:
+    """
+    Předá ruční POER příkaz arbitrovi a převede výsledek na odpověď API.
+
+    Args:
+        request:  FastAPI request (přístup k arbitrovi)
+        endpoint: ``"set_temp"`` nebo ``"set_mode"``
+        data:     Data příkazu
+
+    Returns:
+        dict: ``{"success": True, "skipped": bool, "skip_reason": str | None}``
+
+    Raises:
+        HTTPException 503: POER příkaz selhal i po opakování
+    """
+    api_key = _require_poer_api_key()
+    device_id = _resolve_preferred_device_id()
+    job = poer_command_job(api_key, device_id, endpoint, data, check_noop=False)
+    try:
+        outcome = await _get_arbiter(request).submit(CommandRequest(
+            poer_device_key(device_id), endpoint, CommandSource.MANUAL, job
+        ))
+    except CommandSuperseded as exc:
+        return {"success": True, "skipped": True, "skip_reason": str(exc)}
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=str(exc) or "POER command selhal")
+    return {"success": True, "skipped": not outcome.sent, "skip_reason": outcome.skip_reason}
+
+
 @router.get("/status", summary="Aktuální stav POER termostatu")
 async def get_poer_status() -> dict:
     """Vrátí aktuální stav POER termostatu z cloud API (krátce cachováno)."""
@@ -73,32 +105,16 @@ async def get_poer_status() -> dict:
 
 
 @router.post("/command/set-temperature", summary="Nastaví cílovou teplotu POER")
-async def set_poer_temperature(body: PoerTemperatureRequest) -> dict:
-    """Nastaví cílovou teplotu POER termostatu."""
+async def set_poer_temperature(body: PoerTemperatureRequest, request: Request) -> dict:
+    """Nastaví cílovou teplotu POER termostatu (přes arbitra příkazů)."""
 
-    api_key = _require_poer_api_key()
-    result = await send_poer_command(
-        api_key=api_key,
-        endpoint="set_temp",
-        data={"temperature": body.temperature},
-        preferred_device_id=_resolve_preferred_device_id(),
-    )
-    if not result.get("success"):
-        raise HTTPException(status_code=503, detail=result.get("error_text") or "POER command selhal")
-    return result
+    return await _submit_poer_command(request, "set_temp", {"temperature": body.temperature})
 
 
 @router.post("/command/set-mode", summary="Nastaví režim a předvolbu POER")
-async def set_poer_mode(body: PoerModeRequest) -> dict:
-    """Nastaví režim a předvolbu POER termostatu."""
+async def set_poer_mode(body: PoerModeRequest, request: Request) -> dict:
+    """Nastaví režim a předvolbu POER termostatu (přes arbitra příkazů)."""
 
-    api_key = _require_poer_api_key()
-    result = await send_poer_command(
-        api_key=api_key,
-        endpoint="set_mode",
-        data={"mode": body.mode, "preset": body.preset},
-        preferred_device_id=_resolve_preferred_device_id(),
+    return await _submit_poer_command(
+        request, "set_mode", {"mode": body.mode, "preset": body.preset}
     )
-    if not result.get("success"):
-        raise HTTPException(status_code=503, detail=result.get("error_text") or "POER command selhal")
-    return result
