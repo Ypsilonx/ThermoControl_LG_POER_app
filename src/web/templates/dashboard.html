@@ -433,6 +433,21 @@
                 </button>
             </div>
 
+            <div class="flex gap-2 mb-3" x-show="poerDevices.length > 1">
+                <template x-for="d in poerDevices" :key="d.device_id">
+                    <button @click="selectPoerDevice(d.device_id)"
+                            :disabled="poerLoading"
+                            :class="poerDeviceId === d.device_id
+                                ? 'bg-blue-600 text-white border-blue-500'
+                                : 'bg-gray-700 text-gray-300 border-gray-600 hover:bg-gray-600'"
+                            class="flex-1 text-xs px-2 py-1.5 rounded-lg border transition-colors">
+                        <span x-text="d.name"></span>
+                        <span class="opacity-70"
+                              x-text="d.current_temperature_c !== null ? ' ' + d.current_temperature_c + '°C' : ''"></span>
+                    </button>
+                </template>
+            </div>
+
             <div class="space-y-2 text-sm mb-3">
                 <div class="flex justify-between">
                     <span class="text-gray-400">Aktuální</span>
@@ -1158,6 +1173,8 @@ document.addEventListener('alpine:init', () => {
         poerLoading:     false,
         poerError:       null,
         poerSetTemp:     null,
+        poerDevices:     [],
+        poerDeviceId:    null,
         controlTab:      'lg',
         toastMessage:    '',
         toastType:       'success',
@@ -1226,9 +1243,14 @@ document.addEventListener('alpine:init', () => {
             if (t === null || t === undefined) return null;
             return Math.round(t * 10) / 10;
         },
+        get _poerIsDefaultDevice() {
+            if (!this.poerDeviceId) return true;
+            return !!this.poerDevices.find(d => d.device_id === this.poerDeviceId)?.is_default;
+        },
         get poerCurrentTemp() {
             const live = this.poerStatus?.current_temperature_c;
             if (live !== null && live !== undefined) return Math.round(live * 10) / 10;
+            if (!this._poerIsDefaultDevice) return null;
             const t = this.weatherConfig?.poer_current_temperature_c;
             if (t === null || t === undefined) return null;
             return Math.round(t * 10) / 10;
@@ -1236,6 +1258,7 @@ document.addEventListener('alpine:init', () => {
         get poerTargetTemp() {
             const live = this.poerStatus?.target_temperature_c;
             if (live !== null && live !== undefined) return Math.round(live * 10) / 10;
+            if (!this._poerIsDefaultDevice) return null;
             const t = this.weatherConfig?.poer_target_temperature_c;
             if (t === null || t === undefined) return null;
             return Math.round(t * 10) / 10;
@@ -1247,11 +1270,11 @@ document.addEventListener('alpine:init', () => {
             return this.poerStatus?.preset || 'home';
         },
         get poerTempMin() {
-            const v = this.poerStatus?.temperature_min_c;
+            const v = this.poerStatus?.min_temp_c;
             return v !== null && v !== undefined ? Number(v) : 5;
         },
         get poerTempMax() {
-            const v = this.poerStatus?.temperature_max_c;
+            const v = this.poerStatus?.max_temp_c;
             return v !== null && v !== undefined ? Number(v) : 35;
         },
         get poerStatusLabel() {
@@ -1329,7 +1352,7 @@ document.addEventListener('alpine:init', () => {
             }
             this.connectWS();
             this.loadWeatherConfig();
-            this.loadPoerStatus();
+            this.loadPoerDevices().then(() => this.loadPoerStatus());
             this.loadForecast();
             this.loadEnergy();
             this.loadTodayEnergy();
@@ -1408,11 +1431,35 @@ document.addEventListener('alpine:init', () => {
             } catch (_) {}
         },
 
+        async loadPoerDevices() {
+            try {
+                const r = await fetch('/api/poer/devices');
+                if (!r.ok) return;
+                this.poerDevices = await r.json();
+                if (!this.poerDeviceId && this.poerDevices.length) {
+                    // Výchozí termostat určuje server (is_default) – nezávisí na
+                    // tom, zda už doběhlo načtení weather configu.
+                    const def = this.poerDevices.find(d => d.is_default);
+                    this.poerDeviceId = (def || this.poerDevices[0]).device_id;
+                }
+            } catch (_) {}
+        },
+
+        selectPoerDevice(deviceId) {
+            if (deviceId === this.poerDeviceId) return;
+            this.poerDeviceId = deviceId;
+            this.poerStatus = {};
+            this.poerSetTemp = null;
+            this.loadPoerStatus();
+        },
+
         async loadPoerStatus() {
             this.poerLoading = true;
             this.poerError = null;
             try {
-                const r = await fetch('/api/poer/status');
+                const query = this.poerDeviceId
+                    ? '?device_id=' + encodeURIComponent(this.poerDeviceId) : '';
+                const r = await fetch('/api/poer/status' + query);
                 const d = await r.json().catch(() => ({}));
                 if (!r.ok) {
                     this.poerError = d.detail || 'Nepodařilo se načíst stav POER';
@@ -1434,7 +1481,7 @@ document.addEventListener('alpine:init', () => {
                 const r = await fetch('/api/poer/command/set-mode', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ mode, preset }),
+                    body: JSON.stringify({ mode, preset, device_id: this.poerDeviceId }),
                 });
                 const d = await r.json().catch(() => ({}));
                 if (!r.ok) {
@@ -1461,7 +1508,7 @@ document.addEventListener('alpine:init', () => {
                 const r = await fetch('/api/poer/command/set-temperature', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ temperature: value }),
+                    body: JSON.stringify({ temperature: value, device_id: this.poerDeviceId }),
                 });
                 const d = await r.json().catch(() => ({}));
                 if (!r.ok) {
