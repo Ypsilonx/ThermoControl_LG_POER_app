@@ -39,3 +39,8 @@ packages = ["src"]
 # "Failed to hardlink files; falling back to full copy".
 link-mode = "copy"
 
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
