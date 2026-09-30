@@ -684,37 +684,3 @@ def list_ac_device_ids() -> list[str]:
         for device in list_devices()
         if _is_air_conditioner(device.get("device_type")) and device.get("device_id")
     ]
-
-
-# ------------------------------------------------------------------
-# Zpětná kompatibilita (frontend.py)
-# ------------------------------------------------------------------
-
-async def get_api():
-    """
-    Zpětně kompatibilní funkce – vrací (ThinQApi, None).
-
-    Deprecated: Používejte přímo třídu ThinQAPI.
-    """
-    instance = ThinQAPI()
-    api = await instance.initialize()
-    return api, None
-
-
-async def get_device_status(api: ThinQApi, device_id: str) -> dict:
-    """
-    Zpětně kompatibilní funkce pro získání stavu zařízení.
-
-    Deprecated: Používejte ThinQAPI.get_device_status().
-    """
-    return await api.async_get_device_status(device_id)
-
-
-async def send_device_command(api: ThinQApi, device_id: str, payload: dict) -> dict:
-    """
-    Zpětně kompatibilní funkce pro odeslání příkazu.
-
-    Deprecated: Používejte ThinQAPI.send_device_command().
-    """
-    return await api.async_post_device_control(device_id, payload)
-

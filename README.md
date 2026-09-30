@@ -11,7 +11,7 @@ Webová a desktopová aplikace pro ovládání LG klimatizace a POER termostatu.
 
 - **Webové rozhraní** – single-page dashboard (Tailwind CSS + Alpine.js), tmavý motiv, bez instalace klienta
 - **Real-time push** – MQTT → WebSocket; stavové změny se promítají automaticky (indikátor "Push"/"Offline")
-- **Ovládání klimatizace a POER termostatu** – LG má v dashboardu power, režimy (COOL/HEAT/FAN/AUTO/AIR_DRY), teplotu se sliderem + debounce (°C krok), větrání; ovládání polohy lamel není podporováno ThinQ Connect API. POER má ovládací panel ve web dashboardu i na stránce automatizace (cílová teplota, režim `AUTO`/`HEAT`/`OFF`, předvolba `HOME`/`AWAY`) a v desktop GUI tabu. Web dashboard má přepínací taby `LG klimatizace` / `POER termostat` pro ovládání a horní POER stavový indikátor. Desktop GUI má horní systémový status pro LG i POER se samostatnými stavovými LED indikátory. Proudění vzduchu je zatím v GUI skryté a je ponechané jen v kódu pro další krok.
+- **Ovládání klimatizace a POER termostatu** – LG má v dashboardu power, režimy (COOL/HEAT/FAN/AUTO/AIR_DRY), teplotu se sliderem + debounce (°C krok), větrání; ovládání polohy lamel není podporováno ThinQ Connect API. POER má ovládací panel ve web dashboardu i na stránce automatizace (cílová teplota, režim `AUTO`/`HEAT`/`OFF`, předvolba `HOME`/`AWAY`). Web dashboard má přepínací taby `LG klimatizace` / `POER termostat` pro ovládání (u POER přepínač mezi termostaty) a horní POER stavový indikátor.
 - **AUTO / HAND** – AUTO = sezónní pravidla + PID regulace; HAND = ruční ovládání + HAND scheduler
 - **HAND scheduler** – CRUD plánů: čas od/do, dny v týdnu, akce (mód/teplota/ventilátor), enable/disable
 - **ČHMÚ forecast** – meteogram POI 510 (model ALADIN, asimiluje radar), horizont **72 h**, fallback na region RPZL; sjednocený **tmavý widget** na dashboardu i stránce automatizace: **vlevo aktuální počasí (vždy viditelné)** – velká ikona, teplota, slovní popis a detaily (vlhkost, oblačnost, srážky, vítr + směr `wind_dir_deg`, nárazy, tlak); **vpravo přepínací záložky Dny / Hodiny** – denní min/max teplota + srážky/oblačnost, hodinová předpověď s posuvníkem a horizontálním stripem podrobných kartiček; data jsou **automaticky obnovována** background taskem `_weather_refresh_loop` v intervalu `refresh_interval_hours` (výchozí **3 h**) – nezávisle na aktivním režimu (AUTO/HAND); první fetch proběhne okamžitě při startu serveru
@@ -25,7 +25,7 @@ Webová a desktopová aplikace pro ovládání LG klimatizace a POER termostatu.
 
 ```
 src/
-├── main.py                # Vstupní bod (--mode web | cli | gui)
+├── main.py                # Vstupní bod (--mode web | cli)
 ├── server_api.py          # ThinQ API komunikace + MQTT klient
 ├── command_executor.py    # Sdílená logika provádění příkazů
 ├── command_policy.py      # Preconditions + plán kroků příkazů
@@ -34,8 +34,6 @@ src/
 ├── weather_provider.py    # ČHMÚ meteogram + regionální fallback
 ├── automation_rules.py    # Sezónní pravidla a blokace
 ├── thermal_controller.py  # PID-like regulace teploty
-├── frontend.py            # CLI rozhraní (legacy)
-├── gui/                   # Desktopové GUI – tkinter (legacy fallback)
 └── web/                   # Webová aplikace (primární)
     ├── app.py             # FastAPI instance, lifespan, MQTT→WS bridge
     ├── routes/
@@ -151,7 +149,7 @@ Pro přímé čtení indoor teploty z POER cloudu:
 
 API key se používá pouze v runtime přes proměnné prostředí, neukládá se do JSON konfigurace.
 
-POER je dostupný ve web dashboardu i na stránce automatizace (stav + ovládání mode/preset/teplota) a v desktop GUI tabu.
+POER je dostupný ve web dashboardu i na stránce automatizace (stav + ovládání mode/preset/teplota).
 
 Web API endpointy pro POER:
 - `GET /api/poer/status`

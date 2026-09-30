@@ -4,8 +4,7 @@
 #   1) builder  – sestaví .venv vč. kompilace C rozšíření (gcc)
 #   2) runtime  – štíhlý obraz BEZ gcc/curl (menší plocha útoku)
 # Cílové prostředí: Linux (Docker), Python 3.12-slim.
-# ❗ tkinter NENÍ součástí tohoto obrazu – aplikace běží
-#    výhradně v režimu --mode web.
+# Aplikace běží v režimu --mode web (výchozí).
 # ============================================================
 
 # ------------------------------------------------------------

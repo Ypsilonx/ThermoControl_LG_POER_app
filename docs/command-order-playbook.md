@@ -97,8 +97,6 @@ Dulezite:
   - src/command_executor.py
 - Web API endpoint pro prikazy:
   - src/web/routes/control.py
-- GUI serializace a slouceny refresh:
-  - src/gui/app.py
 - CLI prikazy (parsovani + execute):
   - src/main.py
 

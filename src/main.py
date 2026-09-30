@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Hlavní vstupní bod aplikace ThermoControl-LG-POER_app.
-Podporuje jak CLI, tak GUI a web režim s pokročilými funkcemi včetně plánování.
+Režimy: web (výchozí, FastAPI server) a cli (jednorázové příkazy a stav).
 """
 import sys
 import argparse
@@ -20,8 +20,8 @@ from device_jobs import lg_command_job
 def main():
     """Hlavní funkce aplikace"""
     parser = argparse.ArgumentParser(description="ThermoControl-LG-POER_app")
-    parser.add_argument("--mode", choices=["gui", "cli", "web"], default="gui",
-                       help="Režim spuštění: gui (výchozí), cli nebo web")
+    parser.add_argument("--mode", choices=["cli", "web"], default="web",
+                       help="Režim spuštění: web (výchozí) nebo cli")
     parser.add_argument("--list-devices", action="store_true",
                        help="Vypíše dostupná zařízení z devices.json (CLI)")
     parser.add_argument("--device-id", type=str,
@@ -35,9 +35,7 @@ def main():
     
     args = parser.parse_args()
     
-    if args.mode == "gui":
-        run_gui()
-    elif args.mode == "web":
+    if args.mode == "web":
         run_web()
     elif args.mode == "cli":
         # CLI režim
@@ -98,21 +96,6 @@ def run_web():
         forwarded_allow_ips=settings.forwarded_allow_ips,
     )
 
-
-def run_cli():
-    """Spuštění interaktivního CLI režimu (zpětná kompatibilita)."""
-    import frontend
-    asyncio.run(frontend.main())
-
-def run_gui():
-    """Spuštění GUI režimu"""
-    try:
-        from gui.app import main as gui_main
-        gui_main()
-    except ImportError as e:
-        print(f"Chyba při importu GUI modulů: {e}")
-        print("Zkuste nainstalovat potřebné závislosti: pip install tkinter")
-        sys.exit(1)
 
 def resolve_device_id(device_id: str | None = None, device_alias: str | None = None) -> str:
     """
@@ -249,9 +232,4 @@ def parse_cli_command(command: str) -> tuple[str, tuple[Any, ...]]:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1:
-        # Nový režim s argumenty
-        main()
-    else:
-        # Zpětná kompatibilita - spustí GUI jako výchozí
-        run_gui()
+    main()

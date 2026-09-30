@@ -26,12 +26,8 @@ awsiotsdk==1.29.0
     # via
     #   lg-klimatizace
     #   thinqconnect
-certifi==2026.5.20
-    # via requests
 cffi==2.0.0 ; platform_python_implementation != 'PyPy'
     # via cryptography
-charset-normalizer==3.4.7
-    # via requests
 click==8.4.1
     # via uvicorn
 colorama==0.4.6 ; sys_platform == 'win32'
@@ -55,7 +51,6 @@ httptools==0.8.0
 idna==3.17
     # via
     #   anyio
-    #   requests
     #   yarl
 jinja2==3.1.6
     # via lg-klimatizace
@@ -87,8 +82,6 @@ python-multipart==0.0.29
     # via lg-klimatizace
 pyyaml==6.0.3
     # via uvicorn
-requests==2.34.2
-    # via lg-klimatizace
 starlette==1.2.1
     # via fastapi
 thinqconnect==1.0.12
@@ -107,8 +100,6 @@ typing-inspection==0.4.2
     # via
     #   fastapi
     #   pydantic
-urllib3==2.7.0
-    # via requests
 uvicorn==0.48.0
     # via lg-klimatizace
 uvloop==0.22.1 ; platform_python_implementation != 'PyPy' and sys_platform != 'cygwin' and sys_platform != 'win32'

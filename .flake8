@@ -9,5 +9,3 @@ exclude =
 # Strict: syntax errors, undefined names, invalid escapes
 # (odpovídá CI kroku "Stop the build")
 per-file-ignores =
-    # gui soubory mohou mít delší řádky kvůli Tkinter definicím
-    src/gui/*.py: E501

@@ -123,36 +123,3 @@ def create_control_payload(command_type: str, *args, **kwargs):
     except Exception as e:
         logger.error(f"Chyba při vytváření payloadu pro {command_type}: {e}")
         return {}
-
-# Zpětná kompatibilita s původními funkcemi
-def get_power_payload(power_state: str):
-    """Zpětně kompatibilní funkce pro power payload"""
-    return create_control_payload("power", power_state)
-
-def get_mode_payload(mode: str):
-    """Zpětně kompatibilní funkce pro mode payload"""
-    return create_control_payload("mode", mode)
-
-def get_temperature_payload(temperature: float, mode: str = None):
-    """Vytvoření payloadu pro nastavení teploty"""
-    return create_control_payload("temperature", temperature, mode)
-
-def get_wind_payload(strength: str):
-    """Vytvoření payloadu pro nastavení síly větru"""
-    return create_control_payload("wind_strength", strength)
-
-def get_wind_direction_payload(updown: bool = False, leftright: bool = False):
-    """Vytvoření payloadu pro směr větru"""
-    return create_control_payload("wind_direction", updown, leftright)
-
-def get_power_save_payload(enabled: bool):
-    """Vytvoření payloadu pro power save režim"""
-    return create_control_payload("power_save", enabled)
-
-def get_sleep_timer_payload(hours: int, minutes: int = 0):
-    """Vytvoření payloadu pro sleep timer"""
-    return create_control_payload("sleep_timer", hours, minutes)
-
-def get_cancel_timers_payload():
-    """Vytvoření payloadu pro zrušení všech timerů"""
-    return create_control_payload("cancel_timers")

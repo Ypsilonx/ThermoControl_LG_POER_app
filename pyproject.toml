@@ -14,8 +14,6 @@ dependencies = [
     # TLS a kryptografie (vyžadováno pro MQTT certifikáty)
     "cryptography>=45.0.6",
     "pyOpenSSL>=25.1.0",
-    # HTTP klient pro zpětnou kompatibilitu (frontend.py)
-    "requests>=2.32.4",
     # Web server
     "fastapi>=0.115.12",
     "uvicorn[standard]>=0.34.3",

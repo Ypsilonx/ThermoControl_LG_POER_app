@@ -208,8 +208,7 @@ async def _run_thermal_regulation_for_device(
     """
     Vyhodnotí a případně provede PID-like regulaci pro jedno zařízení.
 
-    Zrcadlí logiku ``gui/automation_energy_mixin.py::_run_thermal_regulation``,
-    ale příkazy posílá přes arbitra (``app.state.arbiter``) stejnými úlohami
+    Příkazy posílá přes arbitra (``app.state.arbiter``) stejnými úlohami
     jako HAND scheduler, takže respektuje preconditions (power_on před
     change_mode), retry v ``ThinQAPI`` a nekoliduje s ručními příkazy.
 
@@ -287,7 +286,7 @@ async def _run_thermal_regulation_for_device(
         return
 
     # Sezónní filtr – PID nesmí obcházet sezónní pravidla (COOL jen v létě,
-    # HEAT ne v chladicí sezóně). Stejná logika jako v GUI mixinu.
+    # HEAT ne v chladicí sezóně).
     if decision.action == "run" and decision.mode:
         mode_upper = decision.mode.upper()
         if mode_upper == "COOL":
@@ -359,11 +358,9 @@ async def _automation_loop(app: FastAPI) -> None:
     Background smyčka AUTO režimu – sezónní pravidla + PID-like termoregulace.
 
     Bez tohoto tasku přepínač AUTO/HAND ve webu jen ukládal stav
-    ``control_mode``, ale žádná logika reálně neřídila zařízení (rozdíl
-    oproti legacy GUI, kde PID běžel v Tkinter smyčce). Tento task tuto
-    mezeru zavírá – používá stejné moduly (``automation_rules``,
-    ``thermal_controller``) jako GUI a stejnou command pipeline jako
-    HAND scheduler.
+    ``control_mode``, ale žádná logika reálně neřídila zařízení. Tento task
+    tuto mezeru zavírá – používá moduly ``automation_rules`` a
+    ``thermal_controller`` a stejnou command pipeline jako HAND scheduler.
 
     Běží pouze pokud je ``control_mode == "AUTO"``. Indoor teplota z POER
     cloudu se cachuje na interval ``weather.refresh_interval_hours``, aby se

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-FastAPI web app (primary) + legacy Tkinter GUI + CLI for controlling LG ThinQ air conditioners and a POER thermostat over the home network. Real-time MQTT→WebSocket push, HAND scheduler, seasonal automation (PID-like regulation), ČHMÚ weather forecast, energy reporting. Deployed primarily via Docker on a home server, reverse-proxied through Cloudflare Tunnel.
+FastAPI web app + CLI for controlling LG ThinQ air conditioners and a POER thermostat over the home network. Real-time MQTT→WebSocket push, HAND scheduler, seasonal automation (PID-like regulation), ČHMÚ weather forecast, energy reporting. Deployed primarily via Docker on a home server, reverse-proxied through Cloudflare Tunnel.
 
 ## Commands
 
@@ -21,9 +21,6 @@ uv run python src/main.py --mode web
 uv run python src/main.py --mode cli --status
 uv run python src/main.py --mode cli --list-devices
 uv run python src/main.py --mode cli --command power_on
-
-# Legacy desktop GUI
-uv run python src/main.py --mode gui
 
 # Tests
 uv run pytest tests/
@@ -46,7 +43,7 @@ CI (`.github/workflows/python-lint.yml`) intentionally does **not** install `req
 
 ```
 src/
-├── main.py                # Entry point: --mode web | cli | gui
+├── main.py                # Entry point: --mode web (default) | cli
 ├── server_api.py          # ThinQ HTTP API client + MQTT client (thinqconnect)
 ├── command_executor.py    # Shared command execution logic (create_payload_for_step, apply_status_hint, execute_plan)
 ├── command_policy.py      # Preconditions + step plan builder (build_command_plan)
@@ -58,8 +55,6 @@ src/
 ├── poer_api.py             # POER thermostat cloud API client
 ├── profile_limits.py       # Device capability/limit lookups from device_profile.json
 ├── env_config.py           # .env loading (load_local_env), used by main.py before other imports
-├── frontend.py              # CLI interface (legacy)
-├── gui/                     # Desktop GUI — Tkinter (legacy fallback)
 └── web/                     # Primary web application
     ├── app.py                # FastAPI instance, lifespan (startup/shutdown), MQTT→WS bridge, background loops
     ├── settings.py            # Env-driven settings (get_settings())
@@ -117,7 +112,7 @@ Mode is persisted in `data/state.json` and toggled via `/api/mode/`.
 - **Code and comment language: Czech.** Docstrings on every function/class (purpose, params, return value).
 - Intra-project imports are bare (`from server_api import ...`, not relative `src.` imports) — `sys.path` is set up in `main.py` before other local imports.
 - The app is async; never block the event loop with synchronous calls.
-- flake8 `max-line-length = 100`, `max-complexity = 10` (see `.flake8`); `src/gui/*.py` is exempted from E501 (long Tkinter layout lines).
+- flake8 `max-line-length = 100`, `max-complexity = 10` (see `.flake8`).
 - `except Exception as e:` used inside a lambda/closure: always capture by value (`lambda err=e: ...`), never by reference — closures over loop/exception variables are a known footgun here.
 - Minimize external dependencies; prefer stdlib where reasonable.
 - Config lives in `data/*.json`; templates are `data/*.json.example`. Never commit `config.json`, `devices.json`, `schedule.json`, or `weather_cache.json` — `.gitignore`/`.dockerignore` already exclude them, but double-check before staging.

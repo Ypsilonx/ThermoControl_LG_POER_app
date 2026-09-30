@@ -1,9 +1,9 @@
 # GitHub Copilot – instrukce pro workspace
 
 ## Projekt
-**Typ:** FastAPI webová aplikace + desktopové GUI (Tkinter) + CLI  
+**Typ:** FastAPI webová aplikace + CLI  
 **Účel:** Ovládání LG ThinQ klimatizací přes domácí síť – real-time MQTT push, plánování (HAND scheduler), sezónní automatika, ČHMÚ počasí, energy reporting.  
-**Primární nasazení:** Docker na domácím serveru, přístup přes prohlížeč. GUI/CLI jako záložní režimy.  
+**Primární nasazení:** Docker na domácím serveru, přístup přes prohlížeč. CLI pro jednorázové příkazy.  
 **Cílový OS:** Windows (vývoj), Linux (Docker produkce)  
 **Python:** 3.12+, venv v `.venv/`
 
@@ -11,7 +11,7 @@
 
 ```
 src/
-├── main.py                # Vstupní bod: --mode web | cli | gui
+├── main.py                # Vstupní bod: --mode web (výchozí) | cli
 ├── server_api.py          # ThinQ HTTP API + MQTT klient (thinqconnect)
 ├── command_executor.py    # Provádění příkazů (sdílená logika)
 ├── command_policy.py      # Preconditions + plán kroků
@@ -20,8 +20,6 @@ src/
 ├── weather_provider.py    # ČHMÚ meteogram + regionální fallback
 ├── automation_rules.py    # Sezónní pravidla a blokace módů
 ├── thermal_controller.py  # PID-like regulace teploty
-├── frontend.py            # CLI rozhraní (legacy)
-├── gui/                   # Desktopové GUI – Tkinter (legacy fallback)
 └── web/                   # Primární webová aplikace
     ├── app.py             # FastAPI instance, lifespan, MQTT→WS bridge
     └── routes/            # REST endpointy + WebSocket
@@ -41,5 +39,5 @@ src/
 ## Důležité upozornění
 
 - `thinqconnect`, `awscrt`, `awsiotsdk` vyžadují kompilaci C – **nelze lehce instalovat v CI**; lint job záměrně neinstaluje `requirements.txt`
-- GUI (Tkinter) je označeno jako legacy; primární rozhraní je web (`--mode web`)
+- Jediné uživatelské rozhraní je web (`--mode web`); Tkinter GUI bylo odstraněno
 - `except Exception as e` + lambda: vždy zachytávat hodnotou `lambda err=e: ...`, ne referencí
