@@ -26,8 +26,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from automation_rules import get_season_for_datetime, load_automation_rules, resolve_scheduled_mode
-from command_executor import execute_plan
-from command_policy import build_command_plan
+from command_arbiter import CommandArbiter, CommandRequest, CommandSource, CommandSuperseded
+from device_jobs import LG_STATE_KEY, lg_apply_action_job, lg_command_job, lg_device_key
 from poer_api import fetch_poer_status
 from server_api import ThinQAPI, list_ac_device_ids
 from thermal_controller import (
@@ -74,72 +74,97 @@ def _load_control_mode() -> str:
 # Scheduler – background task
 # ---------------------------------------------------------------------------
 
-async def _run_schedule_on(api: ThinQAPI, device_id: str, action: dict) -> None:
+async def _submit_schedule_action(
+    arbiter: CommandArbiter,
+    api: ThinQAPI,
+    device_ids: list[str],
+    action: dict | None,
+) -> None:
     """
-    Provede time_on akci plánu: zapne zařízení a aplikuje nastavení.
-
-    Postup:
-        1. Zapnutí (nebo přímá změna módu, která zapnutí zahrnuje).
-        2. Nastavení cílové teploty (pokud je v akci).
-        3. Nastavení intenzity ventilátoru (pokud je v akci).
+    Odešle akci plánovače všem klimatizacím souběžně přes arbitra.
 
     Args:
-        api:       Inicializovaná ThinQAPI instance.
-        device_id: ThinQ ID cílového zařízení.
-        action:    Slovník ``{mode, temperature, wind_strength}`` z plánu.
+        arbiter:    Sdílený arbitr příkazů.
+        api:        Inicializovaná ThinQAPI instance.
+        device_ids: ThinQ ID cílových zařízení.
+        action:     ``{mode, temperature, wind_strength}`` pro time_on, ``None`` pro time_off.
     """
-    try:
-        status = await api.get_device_status(device_id)
 
-        # Krok 1: zapnout – change_mode zahrnuje power_on precondition
-        if action.get("mode"):
-            plan = build_command_plan("change_mode", (action["mode"],), status)
+    async def _one(device_id: str) -> None:
+        """Odešle akci jednomu zařízení a zaloguje výsledek."""
+        if action is None:
+            job = lg_command_job(api, device_id, "power_off", ())
         else:
-            plan = build_command_plan("power_on", (), status)
+            job = lg_apply_action_job(api, device_id, action)
+        try:
+            outcome = await arbiter.submit(CommandRequest(
+                lg_device_key(device_id), LG_STATE_KEY, CommandSource.SCHEDULE, job
+            ))
+            logger.info(
+                "✅ Plánovač: akce dokončena (%s...) %s", device_id[:8], outcome.skip_reason or ""
+            )
+        except CommandSuperseded as exc:
+            logger.info("⏰ Plánovač: akce nahrazena (%s...): %s", device_id[:8], exc)
+        except Exception as exc:
+            logger.error("❌ Plánovač: chyba akce (%s...): %s", device_id[:8], exc)
 
-        if not plan.should_skip:
-            await execute_plan(api, device_id, plan, status)
-            await asyncio.sleep(1.5)
-            status = await api.get_device_status(device_id)
-
-        # Krok 2: teplota
-        if action.get("temperature") is not None:
-            plan = build_command_plan("set_temperature", (action["temperature"],), status)
-            if not plan.should_skip:
-                await execute_plan(api, device_id, plan, status)
-                await asyncio.sleep(1.0)
-                status = await api.get_device_status(device_id)
-
-        # Krok 3: ventilátor
-        if action.get("wind_strength"):
-            plan = build_command_plan("set_wind_strength", (action["wind_strength"],), status)
-            if not plan.should_skip:
-                await execute_plan(api, device_id, plan, status)
-
-        logger.info("✅ Plánovač: time_on akce dokončena (%s...)", device_id[:8])
-    except Exception as exc:
-        logger.error("❌ Plánovač: chyba při time_on: %s", exc)
+    await asyncio.gather(*(_one(device_id) for device_id in device_ids))
 
 
-async def _run_schedule_off(api: ThinQAPI, device_id: str) -> None:
+def _dispatch_schedule_action(
+    app: FastAPI,
+    api: ThinQAPI,
+    device_ids: list[str],
+    action: dict | None,
+) -> None:
     """
-    Provede time_off akci plánu: vypne zařízení.
+    Spustí akci plánovače na pozadí, aby smyčka plánovače nečekala na arbitra.
+
+    Arbitr může požadavek držet kvůli limitu frekvence a úloha trvá i desítky
+    sekund – čekání by způsobilo přeskočení další minuty plánu. Reference na
+    task se drží v ``app.state.background_tasks`` (jinak by ho GC mohl zrušit).
 
     Args:
-        api:       Inicializovaná ThinQAPI instance.
-        device_id: ThinQ ID cílového zařízení.
+        app:        FastAPI instance (arbitr + množina běžících tasků).
+        api:        Inicializovaná ThinQAPI instance.
+        device_ids: ThinQ ID cílových zařízení.
+        action:     Akce pro time_on, ``None`` pro time_off.
     """
-    try:
-        status = await api.get_device_status(device_id)
-        plan = build_command_plan("power_off", (), status)
-        if not plan.should_skip:
-            await execute_plan(api, device_id, plan, status)
-        logger.info("✅ Plánovač: time_off akce dokončena (%s...)", device_id[:8])
-    except Exception as exc:
-        logger.error("❌ Plánovač: chyba při time_off: %s", exc)
+    task = asyncio.create_task(
+        _submit_schedule_action(app.state.arbiter, api, device_ids, action)
+    )
+    app.state.background_tasks.add(task)
+    task.add_done_callback(app.state.background_tasks.discard)
 
 
 AUTOMATION_TICK_SECONDS = 60
+
+
+def _job_for_decision(api: ThinQAPI, device_id: str, decision, policy: ThermalControlPolicy):
+    """
+    Sestaví úlohu pro rozhodnutí PID regulace.
+
+    Args:
+        api:       Inicializovaná ThinQAPI instance.
+        device_id: ThinQ ID cílové klimatizace.
+        decision:  ``ThermalControlDecision`` z ``decide_thermal_control``.
+        policy:    Efektivní politika (výchozí cílová teplota).
+
+    Returns:
+        JobFactory | None: Úloha, nebo None pokud rozhodnutí nic neodesílá.
+    """
+    if decision.action == "power_off":
+        return lg_command_job(api, device_id, "power_off", ())
+    if decision.action == "run" and decision.mode:
+        target_temp = decision.target_temperature_c
+        if target_temp is None:
+            target_temp = policy.target_temperature_c
+        return lg_apply_action_job(api, device_id, {
+            "mode": decision.mode,
+            "temperature": round(float(target_temp), 1),
+            "wind_strength": decision.wind_strength,
+        })
+    return None
 
 
 async def _run_thermal_regulation_for_device(
@@ -158,9 +183,9 @@ async def _run_thermal_regulation_for_device(
     Vyhodnotí a případně provede PID-like regulaci pro jedno zařízení.
 
     Zrcadlí logiku ``gui/automation_energy_mixin.py::_run_thermal_regulation``,
-    ale příkazy provádí přes stejnou webovou pipeline jako HAND scheduler
-    (``_run_schedule_on`` / ``_run_schedule_off``), takže respektuje
-    preconditions (power_on před change_mode) a retry v ``ThinQAPI``.
+    ale příkazy posílá přes arbitra (``app.state.arbiter``) stejnými úlohami
+    jako HAND scheduler, takže respektuje preconditions (power_on před
+    change_mode), retry v ``ThinQAPI`` a nekoliduje s ručními příkazy.
 
     Args:
         app:               FastAPI instance (přístup k ``app.state`` pro
@@ -270,26 +295,23 @@ async def _run_thermal_regulation_for_device(
     if last_sig == signature and last_at is not None and (now_local - last_at) < cooldown:
         return
 
+    job = _job_for_decision(api, device_id, decision, effective_policy)
+    if job is None:
+        return
+
     try:
-        if decision.action == "power_off":
-            await _run_schedule_off(api, device_id)
-        elif decision.action == "run" and decision.mode:
-            target_temp = decision.target_temperature_c
-            if target_temp is None:
-                target_temp = effective_policy.target_temperature_c
-            await _run_schedule_on(
-                api,
-                device_id,
-                {
-                    "mode": decision.mode,
-                    "temperature": round(float(target_temp), 1),
-                    "wind_strength": decision.wind_strength,
-                },
-            )
-        else:
-            return
+        await app.state.arbiter.submit(CommandRequest(
+            lg_device_key(device_id), LG_STATE_KEY, CommandSource.AUTOMATION, job
+        ))
+    except CommandSuperseded as exc:
+        logger.info("🤖 Automation: příkaz nahrazen (%s...): %s", device_id[:8], exc)
+        return
     except Exception as exc:
+        # Podpis se uloží i po selhání (stejně jako dřív) – cooldown pak brání
+        # opakování každou minutu při výpadku LG cloudu a šetří limit volání API.
         logger.error("❌ Automation: provedení PID rozhodnutí selhalo pro %s...: %s", device_id[:8], exc)
+        app.state.thermal_last_signature[device_id] = signature
+        app.state.thermal_last_action_at[device_id] = now_local
         return
 
     app.state.thermal_last_signature[device_id] = signature
@@ -528,8 +550,7 @@ async def _scheduler_loop(app: FastAPI) -> None:
                 if entry.get("time_on") == current_hhmm and key_on not in _executed:
                     _executed.add(key_on)
                     logger.info("⏰ Plánovač: time_on pro '%s' (%s)", name, current_hhmm)
-                    for device_id in device_ids:
-                        await _run_schedule_on(api, device_id, action)
+                    _dispatch_schedule_action(app, api, device_ids, action)
 
                 # time_off
                 time_off = entry.get("time_off")
@@ -537,8 +558,7 @@ async def _scheduler_loop(app: FastAPI) -> None:
                 if time_off and time_off == current_hhmm and key_off not in _executed:
                     _executed.add(key_off)
                     logger.info("⏰ Plánovač: time_off pro '%s' (%s)", name, current_hhmm)
-                    for device_id in device_ids:
-                        await _run_schedule_off(api, device_id)
+                    _dispatch_schedule_action(app, api, device_ids, None)
 
             # Vyčistit záznamy staršího dne
             _executed = {k for k in _executed if f":{today} " in k}
@@ -633,6 +653,10 @@ async def lifespan(app: FastAPI):
 
     # Inicializace sdíleného in-memory stavu (mode se načítá z state.json)
     app.state.control_mode = _load_control_mode()
+
+    # Jediná brána pro příkazy zařízením – web, scheduler i automatika.
+    app.state.arbiter = CommandArbiter()
+    app.state.background_tasks = set()
 
     # Perzistentní stav PID regulace (watchdog + deduplikace příkazů) mezi tiky.
     app.state.thermal_states = {}
@@ -729,6 +753,8 @@ async def lifespan(app: FastAPI):
         await mqtt_watchdog_task
     except asyncio.CancelledError:
         logger.info("🔧 MQTT watchdog zastaven")
+    await app.state.arbiter.close()
+    logger.info("🔧 Arbitr příkazů ukončen")
 
     api_instance: ThinQAPI | None = getattr(app.state, "api", None)
     if api_instance is not None:
