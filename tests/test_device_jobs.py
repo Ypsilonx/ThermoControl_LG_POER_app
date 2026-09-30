@@ -180,6 +180,39 @@ class PoerJobTests(unittest.IsolatedAsyncioTestCase):
             )()
         self.assertTrue(outcome.sent)
         fetch.assert_not_awaited()
+        self.assertEqual(
+            [c.kwargs["endpoint"] for c in send.await_args_list], ["set_mode", "set_temp"]
+        )
+        self.assertEqual(send.await_args_list[0].kwargs["data"], {"mode": "heat", "preset": "home"})
+
+    async def test_noop_check_in_auto_mode_switches_to_heat(self) -> None:
+        result = {"success": True, "device_id": "p1", "error_text": None}
+        status = self._status(mode="auto", target_temperature_c=21.0)
+        with patch.object(device_jobs, "fetch_poer_status", AsyncMock(return_value=status)), \
+             patch.object(device_jobs, "send_poer_command",
+                          AsyncMock(return_value=result)) as send:
+            outcome = await poer_command_job("key", "p1", "set_temp", {"temperature": 21.0})()
+        self.assertTrue(outcome.sent)
+        self.assertEqual(
+            [c.kwargs["endpoint"] for c in send.await_args_list], ["set_mode", "set_temp"]
+        )
+
+    async def test_noop_check_in_heat_mode_sends_only_temperature(self) -> None:
+        result = {"success": True, "device_id": "p1", "error_text": None}
+        with patch.object(device_jobs, "fetch_poer_status",
+                          AsyncMock(return_value=self._status(mode="heat"))), \
+             patch.object(device_jobs, "send_poer_command",
+                          AsyncMock(return_value=result)) as send:
+            await poer_command_job("key", "p1", "set_temp", {"temperature": 23.0})()
+        self.assertEqual([c.kwargs["endpoint"] for c in send.await_args_list], ["set_temp"])
+
+    async def test_failed_mode_switch_stops_before_temperature(self) -> None:
+        fail = {"success": False, "device_id": "p1", "error_text": "POER command selhal: 500"}
+        with patch.object(device_jobs, "send_poer_command", AsyncMock(return_value=fail)) as send:
+            with self.assertRaisesRegex(RuntimeError, "500"):
+                await poer_command_job(
+                    "key", "p1", "set_temp", {"temperature": 21.0}, check_noop=False
+                )()
         send.assert_awaited_once()
 
     async def test_failed_send_raises(self) -> None:

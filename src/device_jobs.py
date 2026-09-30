@@ -127,6 +127,36 @@ def lg_apply_action_job(api: Any, device_id: str, action: dict) -> JobFactory:
     return run
 
 
+# Ruční režim POER, jak ho hlásí fetch_poer_status. Jen v něm nastavená teplota
+# platí trvale – v „auto“ ji vlastní program termostatu při dalším bloku přepíše.
+_POER_MANUAL = ("heat", "home")
+
+
+def _poer_steps(endpoint: str, data: dict, status: dict | None) -> list[tuple[str, dict]]:
+    """
+    Rozloží POER příkaz na kroky.
+
+    Nastavení teploty se posílá jako ``heat`` + teplota. POER zpracuje v jednom
+    požadavku jen první příkaz, proto dva požadavky; přepnutí do ``heat`` na chvíli
+    aktivuje uloženou ruční teplotu, kterou druhý krok hned přepíše.
+
+    Args:
+        endpoint: ``"set_temp"`` nebo ``"set_mode"``
+        data:     Data příkazu
+        status:   Čerstvý stav termostatu, nebo None (neznámý – posílá se vše)
+
+    Returns:
+        list: Dvojice (endpoint, data) v pořadí odeslání
+    """
+    if endpoint != "set_temp":
+        return [(endpoint, data)]
+    steps: list[tuple[str, dict]] = []
+    if status is None or (status.get("mode"), status.get("preset")) != _POER_MANUAL:
+        steps.append(("set_mode", {"mode": "heat", "preset": "home"}))
+    steps.append(("set_temp", data))
+    return steps
+
+
 def _poer_requested_state(data: dict) -> tuple[str, str]:
     """
     Normalizuje požadovaný režim POER stejně, jako ho vrací ``fetch_poer_status``.
@@ -161,7 +191,9 @@ def _poer_skip_reason(status: dict, endpoint: str, data: dict) -> str | None:
         return None
     if endpoint == "set_temp":
         current = status.get("target_temperature_c")
-        if current is not None and abs(float(current) - float(data["temperature"])) < 0.05:
+        in_manual = (status.get("mode"), status.get("preset")) == _POER_MANUAL
+        if (in_manual and current is not None
+                and abs(float(current) - float(data["temperature"])) < 0.05):
             return f"Cílová teplota POER už je {current} °C."
         return None
     if endpoint == "set_mode":
@@ -188,22 +220,30 @@ def poer_command_job(
         check_noop: Před odesláním ověřit čerstvý stav a nic neměnící příkaz přeskočit.
                     Ruční příkazy ho vypínají – POER cloud propisuje změny se
                     zpožděním a uživatel musí vždy dostat, co zadal.
+                    Nastavení teploty vždy končí v ručním režimu (``heat``).
 
     Returns:
         JobFactory: Úloha vracející ``CommandOutcome``; při selhání cloudu vyhodí
                     ``RuntimeError`` (arbitr ji zopakuje)
     """
     async def run() -> CommandOutcome:
+        status = None
         if check_noop:
             # Bez cache – stav starý až 20 s by mohl přeskočit skutečnou změnu.
             status = await fetch_poer_status(api_key=api_key, preferred_device_id=device_id)
             skip_reason = _poer_skip_reason(status, endpoint, data)
             if skip_reason:
                 return CommandOutcome(sent=False, skip_reason=skip_reason)
-        result = await send_poer_command(
-            api_key=api_key, endpoint=endpoint, data=data, preferred_device_id=device_id
-        )
-        if not result.get("success"):
-            raise RuntimeError(result.get("error_text") or "POER příkaz selhal.")
-        return CommandOutcome(sent=True, steps=[{"step": endpoint, "result": result}])
+            if status.get("error_text"):
+                status = None
+        steps = []
+        for step_endpoint, step_data in _poer_steps(endpoint, data, status):
+            result = await send_poer_command(
+                api_key=api_key, endpoint=step_endpoint, data=step_data,
+                preferred_device_id=device_id,
+            )
+            if not result.get("success"):
+                raise RuntimeError(result.get("error_text") or "POER příkaz selhal.")
+            steps.append({"step": step_endpoint, "result": result})
+        return CommandOutcome(sent=True, steps=steps)
     return run
