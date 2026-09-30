@@ -1410,13 +1410,16 @@ document.addEventListener('alpine:init', () => {
                 if (r.ok) {
                     this.status     = { ...this.status, [id]: await r.json() };
                     this.lastUpdate = new Date();
-                    // Vymazat override jakmile zařízení potvrdí novou cílovou teplotu
-                    if (this._tempOverride !== null) {
-                        const reported = this.status[id]?.temperature?.targetTemperature;
-                        if (reported === this._tempOverride) this._tempOverride = null;
-                    }
+                    this._clearConfirmedOverride(id);
                 }
             } catch (_) {}
+        },
+
+        /** Zruší dočasné zobrazení cílové teploty, jakmile ji zařízení potvrdí. */
+        _clearConfirmedOverride(id) {
+            if (this._tempOverride === null) return;
+            const reported = this.status[id]?.temperature?.targetTemperature;
+            if (reported === this._tempOverride) this._tempOverride = null;
         },
 
         async loadWeatherConfig() {
@@ -1674,14 +1677,13 @@ document.addEventListener('alpine:init', () => {
                 try {
                     const msg = JSON.parse(ev.data);
                     if (msg.type === 'device_status') {
-                        const id = msg.device_id || self.devices[0]?.device_id;
-                        if (id) {
-                            // Okamžitý merge MQTT partial dat – UI reaguje ihned
-                            if (msg.data && typeof msg.data === 'object' && Object.keys(msg.data).length > 0) {
-                                self._mergeStatus(id, msg.data);
-                            }
-                            // Zpožděný HTTP refresh – dá LG cloudu čas aktualizovat cache
-                            setTimeout(() => self.refreshStatus(id), 2500);
+                        const id = msg.device_id;
+                        // Server posílá přímo změněnou část stavu (ThinQ "report") se
+                        // správným ID – stačí ji sloučit. Dřívější zpožděné HTTP čtení
+                        // stálo za každou zprávu a otevřený tab jedno volání LG API.
+                        if (id && msg.data && typeof msg.data === 'object' && Object.keys(msg.data).length > 0) {
+                            self._mergeStatus(id, msg.data);
+                            self._clearConfirmedOverride(id);
                         }
                     } else if (msg.type === 'mode_change') {
                         self.controlMode = msg.data.mode;
