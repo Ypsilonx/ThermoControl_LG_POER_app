@@ -118,7 +118,7 @@ Zóna odkazuje role na **seřazený seznam zdrojů**:
 ```
 kuchoobyvak.vnitrni_teplota  = [poer_kuchoobyvak, lg_klima]
 kuchoobyvak.venkovni_teplota = [cidlo_vychod, chmi]
-kuchoobyvak.indikator_krbu   = [zasuvka_cerpadlo, odhad_z_trendu]
+kuchoobyvak.indikator_krbu   = [zasuvka_cerpadlo]
 koupelna.vnitrni_teplota     = [poer_koupelna]
 koupelna.vnitrni_vlhkost     = [poer_koupelna]
 koupelna.venkovni_teplota    = [cidlo_zapad, chmi]
@@ -128,10 +128,18 @@ Každá hodnota nese čas měření; starší než limit (výchozí 15 min) → 
 
 ### 5.3 Odvozené signály
 
-- **Krb topí (odhad)** – nárůst vnitřní teploty > 0,5 °C za 20 min, zatímco AC ani fólie netopí. Po zapojení zásuvky čerpadla se odhad nepoužívá.
-- **Otevřené okno** – pokles > 1,5 °C za 10 min → pozastavení zóny na 20 min.
+- **Krb topí** – pouze z chytré zásuvky čerpadla radiátoru (rozhodnutí 2026-09-30). Odhad z trendu teploty se nedělá; bez zásuvky automatika o krbu neví a topení odstaví regulace po dosažení cíle.
+- Detekce otevřeného okna se nedělá (rozhodnutí 2026-09-30).
 
-Všechny prahy jsou konfigurovatelné.
+### 5.4 Historie dat
+
+Pro ladění automatiky se ukládá historie do SQLite `data/history.db` (výchozí uchování 90 dní):
+
+- `measurements` (úzká tabulka čas/zdroj/zařízení/veličina/hodnota/text): POER oba termostaty každých 5 min (teplota, vlhkost, cíl, režim, topí), LG z MQTT zpráv (zapnuto, režim, cíl, teplota), ČHMÚ při každém stažení (teplota, oblačnost, srážky, vlhkost, vítr).
+- `forecast`: snímek hodinové předpovědi při každém stažení (porovnání předpověď × skutečnost).
+- `energy_daily`: denní spotřeba AC z LG (1 volání/den).
+- Intervaly topení se neukládají, počítají se z `heating` při exportu (odhad kWh pro POER podle příkonu).
+- Export CSV: `GET /api/history/export`. Grafy až po nasbírání dat.
 
 ## 6. Volba zdroje tepla
 
@@ -195,7 +203,7 @@ Každý podprojekt má vlastní implementační plán a je samostatně nasaditel
 1. **Ověření LG na živých datech** (průzkum) – reálný status/profil, ověření příkazů (měnící příkazy jen se souhlasem), zápis zjištění. Současně ověření obou POER termostatů (read-only `SYNC`/`QUERY`).
 2. **Arbitr příkazů** – fronta, priority, deduplikace, frekvence; přesměrování všech cest na arbitra.
 3. **POER multi-device** – klient pro více termostatů, jednotné rozhraní zařízení.
-4. **Registr čidel** – zdroje `poer`, `lg`, `chmi`, `http`, rozhraní `smart_plug`, stáří hodnot, odvozené signály.
+4. **Historie dat** (kap. 5.4) – sběr a ukládání; registr čidel se stářím hodnot a zdrojem `smart_plug` se přesouvá do podprojektu 5 (zóny).
 5. **Zóny, režimy, program, dovolená, přebití** – `zones.json`, `control.json`, řídicí smyčka s dry-run, UI.
 6. **Automatika a volba zdroje** – slunce, předpověď, vysoušení, tarif, logika fólie/AC.
 
