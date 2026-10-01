@@ -224,8 +224,12 @@ def poer_command_job(
 
     Returns:
         JobFactory: Úloha vracející ``CommandOutcome``; při selhání cloudu vyhodí
-                    ``RuntimeError`` (arbitr ji zopakuje)
+                    ``RuntimeError`` (arbitr ji zopakuje). Opakovaný pokus přeskočí
+                    kroky, které už prošly – jinak by znovu poslal ``heat`` a
+                    termostat by na chvíli skočil na uloženou ruční teplotu.
     """
+    done_steps: list[dict] = []
+
     async def run() -> CommandOutcome:
         status = None
         if check_noop:
@@ -236,14 +240,16 @@ def poer_command_job(
                 return CommandOutcome(sent=False, skip_reason=skip_reason)
             if status.get("error_text"):
                 status = None
-        steps = []
+        finished = {step["step"] for step in done_steps}
         for step_endpoint, step_data in _poer_steps(endpoint, data, status):
+            if step_endpoint in finished:
+                continue
             result = await send_poer_command(
                 api_key=api_key, endpoint=step_endpoint, data=step_data,
                 preferred_device_id=device_id,
             )
             if not result.get("success"):
                 raise RuntimeError(result.get("error_text") or "POER příkaz selhal.")
-            steps.append({"step": step_endpoint, "result": result})
-        return CommandOutcome(sent=True, steps=steps)
+            done_steps.append({"step": step_endpoint, "result": result})
+        return CommandOutcome(sent=True, steps=list(done_steps))
     return run

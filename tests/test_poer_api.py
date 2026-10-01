@@ -137,6 +137,36 @@ class PoerClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first, second)
         self.assertEqual(post.await_count, 2)
 
+    async def test_single_status_shares_cache_with_all_statuses(self) -> None:
+        post = AsyncMock(side_effect=[SYNC, QUERY])
+        with patch.object(poer_api, "_post_ha", post):
+            await poer_api.fetch_poer_statuses_cached(KEY)
+            kitchen = await poer_api.fetch_poer_status_cached(KEY, "fee89300f2a5")
+            default = await poer_api.fetch_poer_status_cached(KEY)
+        self.assertEqual(kitchen["device_id"], "fee89300f2a5")
+        self.assertEqual(default["device_id"], "fee89300f2a5")
+        self.assertEqual(post.await_count, 2)
+
+    async def test_offline_device_status_is_cached(self) -> None:
+        query = {"payload": {"devices": {"fee89300f2a5": {"online": False},
+                                         "fee89300fac5": {"online": False}}}}
+        post = AsyncMock(side_effect=[SYNC, query])
+        with patch.object(poer_api, "_post_ha", post):
+            first = await poer_api.fetch_poer_status_cached(KEY, "fee89300fac5")
+            second = await poer_api.fetch_poer_status_cached(KEY, "fee89300fac5")
+        self.assertFalse(first["online"])
+        self.assertEqual(first, second)
+        self.assertEqual(post.await_count, 2)
+
+    async def test_cached_status_retries_once_and_returns_error_dict(self) -> None:
+        err = poer_api.PoerApiError("POER SYNC selhal: 500")
+        post = AsyncMock(side_effect=err)
+        with patch.object(poer_api, "_post_ha", post), \
+             patch.object(poer_api, "_RETRY_DELAY_S", 0):
+            status = await poer_api.fetch_poer_status_cached(KEY)
+        self.assertEqual(status["error_text"], "POER SYNC selhal: 500")
+        self.assertEqual(post.await_count, 2)
+
 
 class _RaisingSession:
     """Falešná aiohttp session, jejíž post() vyhodí zadanou výjimku."""

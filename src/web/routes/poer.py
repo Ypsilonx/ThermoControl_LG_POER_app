@@ -14,7 +14,7 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from command_arbiter import CommandRequest, CommandSource, CommandSuperseded
+from command_arbiter import ArbiterClosed, CommandRequest, CommandSource, CommandSuperseded
 from device_jobs import poer_command_job, poer_device_key
 from poer_api import (
     PoerApiError,
@@ -81,7 +81,8 @@ async def _resolve_device(api_key: str, requested: str | None) -> dict:
 
     Bez ``requested`` se použije ``weather.poer_device_id``; chybí-li nebo je
     zastaralé, první termostat. Výsledné ID je tak vždy skutečné – jeden fyzický
-    termostat má v arbitrovi jedinou frontu.
+    termostat má v arbitrovi jedinou frontu. Neznámé ``requested`` vynutí jedno
+    nové načtení seznamu (je cachovaný hodinu a termostat mohl právě přibýt).
 
     Args:
         api_key:   POER API klíč
@@ -99,6 +100,12 @@ async def _resolve_device(api_key: str, requested: str | None) -> dict:
     except PoerApiError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
     by_id = {d["device_id"]: d for d in devices}
+    if requested and requested not in by_id:
+        try:
+            devices = await fetch_poer_devices(api_key, ttl_seconds=0)
+        except PoerApiError as exc:
+            raise HTTPException(status_code=503, detail=str(exc))
+        by_id = {d["device_id"]: d for d in devices}
     if requested:
         if requested not in by_id:
             raise HTTPException(status_code=404, detail=f"Neznámý POER termostat: {requested}")
@@ -151,7 +158,7 @@ async def _submit_poer_command(
     Raises:
         HTTPException 404: Neznámý termostat
         HTTPException 422: Teplota mimo rozsah termostatu
-        HTTPException 503: POER příkaz selhal i po opakování
+        HTTPException 503: POER příkaz selhal i po opakování nebo se server vypíná
     """
     api_key = _require_poer_api_key()
     device = await _resolve_device(api_key, requested_device_id)
@@ -163,6 +170,8 @@ async def _submit_poer_command(
         outcome = await _get_arbiter(request).submit(CommandRequest(
             poer_device_key(device_id), endpoint, CommandSource.MANUAL, job
         ))
+    except ArbiterClosed as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
     except CommandSuperseded as exc:
         return {"success": True, "skipped": True, "skip_reason": str(exc)}
     except Exception as exc:

@@ -224,6 +224,21 @@ class PoerJobTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(RuntimeError, "500"):
                 await poer_command_job("key", "p1", "set_temp", {"temperature": 25.0})()
 
+    async def test_retry_continues_after_completed_mode_switch(self) -> None:
+        ok = {"success": True, "device_id": "p1", "error_text": None}
+        fail = {"success": False, "device_id": "p1", "error_text": "POER command selhal: 500"}
+        send = AsyncMock(side_effect=[ok, fail, ok])
+        job = poer_command_job("key", "p1", "set_temp", {"temperature": 21.0}, check_noop=False)
+        with patch.object(device_jobs, "send_poer_command", send):
+            with self.assertRaises(RuntimeError):
+                await job()
+            outcome = await job()
+        self.assertTrue(outcome.sent)
+        self.assertEqual(
+            [c.kwargs["endpoint"] for c in send.await_args_list],
+            ["set_mode", "set_temp", "set_temp"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

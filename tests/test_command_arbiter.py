@@ -12,6 +12,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from command_arbiter import (  # noqa: E402
+    ArbiterClosed,
     ArbiterConfig,
     CommandArbiter,
     CommandOutcome,
@@ -264,13 +265,44 @@ class CommandArbiterTests(unittest.IsolatedAsyncioTestCase):
             "lg:1", "x", CommandSource.AUTOMATION, _job([], "x"))))
         await asyncio.sleep(0)
         await self.arbiter.close()
-        with self.assertRaises(CommandSuperseded):
+        with self.assertRaises(ArbiterClosed):
             await pending
-        with self.assertRaises(CommandSuperseded):
+        with self.assertRaises(ArbiterClosed):
             await self._blocker
-        with self.assertRaises(RuntimeError):
+        with self.assertRaises(ArbiterClosed):
             await self.arbiter.submit(CommandRequest(
                 "lg:1", "y", CommandSource.MANUAL, _job([], "y")))
+
+    async def test_invalid_command_is_not_retried_nor_counted_as_failure(self) -> None:
+        await self.arbiter.close()
+        self.arbiter = CommandArbiter(_config(max_attempts=3, unavailable_after_failures=1))
+        calls = {"n": 0}
+
+        async def invalid() -> CommandOutcome:
+            calls["n"] += 1
+            raise ValueError("Neznámý příkaz")
+
+        with self.assertRaises(ValueError):
+            await self.arbiter.submit(CommandRequest(
+                "lg:1", "x", CommandSource.MANUAL, invalid))
+        self.assertEqual(calls["n"], 1)
+        self.assertTrue(self.arbiter.health("lg:1").available)
+        self.assertEqual(self.arbiter.health("lg:1").consecutive_failures, 0)
+
+    async def test_crashed_worker_fails_pending_and_lane_recovers(self) -> None:
+        original = self.arbiter._execute
+
+        async def broken(*_args):
+            raise AssertionError("chyba v arbitrovi")
+
+        self.arbiter._execute = broken
+        with self.assertRaises(CommandSuperseded):
+            await asyncio.wait_for(self.arbiter.submit(CommandRequest(
+                "lg:1", "x", CommandSource.MANUAL, _job([], "x"))), timeout=1)
+        self.arbiter._execute = original
+        outcome = await asyncio.wait_for(self.arbiter.submit(CommandRequest(
+            "lg:1", "y", CommandSource.MANUAL, _job([], "y"))), timeout=1)
+        self.assertTrue(outcome.sent)
 
 
 if __name__ == "__main__":

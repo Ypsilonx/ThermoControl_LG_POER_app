@@ -16,7 +16,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, field_validator
 
 from command_arbiter import CommandRequest as ArbiterRequest
-from command_arbiter import CommandSource, CommandSuperseded
+from command_arbiter import ArbiterClosed, CommandSource, CommandSuperseded
 from device_jobs import lg_command_job, lg_device_key
 from web.routes.devices import _get_api, _get_arbiter
 
@@ -112,7 +112,7 @@ async def send_command(device_id: str, body: CommandRequest, request: Request):
 
     Raises:
         HTTPException 422: Nepovolený příkaz (Pydantic validace)
-        HTTPException 503: ThinQ API nedostupné nebo selhání příkazu
+        HTTPException 503: ThinQ API nedostupné, selhání příkazu nebo vypínání serveru
         HTTPException 400: Neznámý příkaz v plánu
     """
     api = _get_api(request)
@@ -122,6 +122,8 @@ async def send_command(device_id: str, body: CommandRequest, request: Request):
         outcome = await _get_arbiter(request).submit(ArbiterRequest(
             lg_device_key(device_id), body.command, CommandSource.MANUAL, job
         ))
+    except ArbiterClosed as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
     except CommandSuperseded as exc:
         logger.info(f"Příkaz '{body.command}' nahrazen: {exc}")
         return CommandResponse(skipped=True, skip_reason=str(exc), steps=[])

@@ -68,6 +68,10 @@ class CommandSuperseded(Exception):
     """Příkaz nebyl proveden – nahradil ho novější/důležitější příkaz nebo byl arbitr ukončen."""
 
 
+class ArbiterClosed(CommandSuperseded):
+    """Příkaz nebyl proveden, protože se arbitr ukončuje (vypínání serveru)."""
+
+
 @dataclass(frozen=True)
 class DeviceTiming:
     """
@@ -210,12 +214,12 @@ class CommandArbiter:
             CommandOutcome: Výsledek úlohy
 
         Raises:
-            CommandSuperseded: Požadavek nahradil jiný nebo byl arbitr ukončen
-            RuntimeError:      Arbitr je už ukončen
+            ArbiterClosed:     Arbitr je nebo byl během čekání ukončen
+            CommandSuperseded: Požadavek nahradil jiný
             Exception:         Poslední chyba úlohy po vyčerpání pokusů
         """
         if self._closed:
-            raise RuntimeError("Arbitr příkazů je ukončen.")
+            raise ArbiterClosed("Arbitr příkazů je ukončen.")
         lane = self._lane(request.device_key)
         future = asyncio.get_running_loop().create_future()
         self._enqueue(lane, request, future)
@@ -235,12 +239,12 @@ class CommandArbiter:
         return lane.health if lane else DeviceHealth()
 
     async def close(self) -> None:
-        """Ukončí workery a všem čekajícím požadavkům vrátí ``CommandSuperseded``."""
+        """Ukončí workery a všem čekajícím požadavkům vrátí ``ArbiterClosed``."""
         self._closed = True
         workers = []
         for lane in self._lanes.values():
             for item in lane.pending:
-                _fail(item.future, CommandSuperseded("Arbitr příkazů byl ukončen."))
+                _fail(item.future, ArbiterClosed("Arbitr příkazů byl ukončen."))
             lane.pending.clear()
             if lane.worker is not None:
                 lane.worker.cancel()
@@ -257,6 +261,22 @@ class CommandArbiter:
             )
             self._lanes[device_key] = lane
         return lane
+
+    def _abandon_lane(self, device_key: str, lane: _DeviceLane, item: _Pending,
+                      exc: Exception) -> None:
+        """
+        Zahodí frontu zařízení po interní chybě arbitra (worker končí).
+
+        Rozpracovaný i čekající požadavky dostanou ``CommandSuperseded`` – jinak
+        by volající visel navždy. Další ``submit`` založí frontu s novým workerem.
+        Běží synchronně ve workeru, takže nový požadavek nemůže skončit v mrtvé frontě.
+        """
+        logger.error("❌ Arbitr: worker %s spadl: %r", device_key, exc)
+        if self._lanes.get(device_key) is lane:
+            del self._lanes[device_key]
+        for pending in [item, *lane.pending]:
+            _fail(pending.future, CommandSuperseded("Interní chyba arbitra příkazů."))
+        lane.pending.clear()
 
     def _enqueue(self, lane: _DeviceLane, request: CommandRequest, future: asyncio.Future) -> None:
         """
@@ -321,7 +341,11 @@ class CommandArbiter:
                     pass
                 continue
             lane.pending.remove(item)
-            await self._execute(lane, timing, item)
+            try:
+                await self._execute(lane, timing, item)
+            except Exception as exc:
+                self._abandon_lane(device_key, lane, item, exc)
+                return
 
     @staticmethod
     def _rate_limit_wait(lane: _DeviceLane, timing: DeviceTiming, source: CommandSource) -> float:
@@ -343,8 +367,12 @@ class CommandArbiter:
             outcome = await self._run_with_retries(item.request, timing)
         except asyncio.CancelledError:
             # Ukončení arbitra během úlohy nebo prodlevy – volající nesmí zůstat viset.
-            _fail(item.future, CommandSuperseded("Arbitr příkazů byl ukončen."))
+            _fail(item.future, ArbiterClosed("Arbitr příkazů byl ukončen."))
             raise
+        except ValueError as exc:
+            # Neplatný příkaz/argument je chyba volajícího, ne porucha zařízení.
+            _fail(item.future, exc)
+            return
         except Exception as exc:
             # Neúspěšná úloha mohla část kroků odeslat – počítá se do limitu frekvence.
             lane.last_sent_at = time.monotonic()
@@ -362,6 +390,8 @@ class CommandArbiter:
         """
         Spustí úlohu; při výjimce ji zopakuje s rostoucí prodlevou.
 
+        ``ValueError`` (neplatný příkaz) se neopakuje – další pokus by dopadl stejně.
+
         Args:
             request: Požadavek s úlohou
             timing:  Počet pokusů a základní prodleva
@@ -376,6 +406,8 @@ class CommandArbiter:
         for attempt in range(1, attempts):
             try:
                 return await request.run()
+            except ValueError:
+                raise
             except Exception:
                 await asyncio.sleep(timing.backoff_base_s * 2 ** (attempt - 1))
         return await request.run()

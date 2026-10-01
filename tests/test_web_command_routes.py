@@ -13,7 +13,9 @@ if str(SRC) not in sys.path:
 
 from fastapi import HTTPException  # noqa: E402
 
-from command_arbiter import CommandOutcome, CommandSource, CommandSuperseded  # noqa: E402
+from command_arbiter import (  # noqa: E402
+    ArbiterClosed, CommandOutcome, CommandSource, CommandSuperseded,
+)
 from poer_api import PoerApiError  # noqa: E402
 from web.routes import control, poer  # noqa: E402
 
@@ -65,6 +67,13 @@ class ControlRouteTests(unittest.IsolatedAsyncioTestCase):
         response = await control.send_command("dev1", body, _request(arbiter))
         self.assertTrue(response.skipped)
         self.assertEqual(response.skip_reason, "Nahrazen novějším příkazem.")
+
+    async def test_shutdown_returns_503(self) -> None:
+        arbiter = FakeArbiter(error=ArbiterClosed("Arbitr příkazů byl ukončen."))
+        body = control.CommandRequest(command="power_on", args=[])
+        with self.assertRaises(HTTPException) as ctx:
+            await control.send_command("dev1", body, _request(arbiter))
+        self.assertEqual(ctx.exception.status_code, 503)
 
     async def test_failure_returns_503(self) -> None:
         arbiter = FakeArbiter(error=RuntimeError("cloud nedostupný"))
@@ -140,6 +149,23 @@ class PoerRouteTests(unittest.IsolatedAsyncioTestCase):
             await poer.set_poer_mode(body, _request(arbiter))
         self.assertEqual(ctx.exception.status_code, 404)
         self.assertEqual(arbiter.requests, [])
+        # Neznámé ID vynutí jedno nové načtení seznamu (nový termostat na účtu).
+        self.assertEqual(poer.fetch_poer_devices.await_count, 2)
+
+    async def test_new_device_found_after_refresh(self) -> None:
+        new = {"device_id": "novy", "name": "Loznice", "min_temp_c": 5.0, "max_temp_c": 32.0}
+        poer.fetch_poer_devices.side_effect = [self.devices, self.devices + [new]]
+        arbiter = FakeArbiter(result=CommandOutcome(sent=True))
+        await poer.set_poer_mode(poer.PoerModeRequest(mode="heat", device_id="novy"),
+                                 _request(arbiter))
+        self.assertEqual(arbiter.requests[0].device_key, "poer:novy")
+        self.assertEqual(poer.fetch_poer_devices.await_args.kwargs["ttl_seconds"], 0)
+
+    async def test_shutdown_returns_503(self) -> None:
+        arbiter = FakeArbiter(error=ArbiterClosed("Arbitr příkazů byl ukončen."))
+        with self.assertRaises(HTTPException) as ctx:
+            await poer.set_poer_mode(poer.PoerModeRequest(mode="heat"), _request(arbiter))
+        self.assertEqual(ctx.exception.status_code, 503)
 
     async def test_status_for_selected_device(self) -> None:
         status = {"device_id": "fee89300fac5"}

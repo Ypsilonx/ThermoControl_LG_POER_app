@@ -1469,6 +1469,9 @@ document.addEventListener('alpine:init', () => {
                     return;
                 }
                 this.poerStatus = d || {};
+                // Čerstvý stav propsat i do přepínače termostatů (jinak ukazuje teploty z načtení stránky).
+                const idx = this.poerDevices.findIndex(dev => dev.device_id === d.device_id);
+                if (idx >= 0) this.poerDevices[idx] = { ...this.poerDevices[idx], ...d };
                 if (this.poerTargetTemp !== null) this.poerSetTemp = this.poerTargetTemp;
             } catch (_) {
                 this.poerError = 'Chyba připojení k API POER';

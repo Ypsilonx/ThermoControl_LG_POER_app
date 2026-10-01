@@ -27,6 +27,9 @@ _status_cache_lock = asyncio.Lock()
 
 # Seznam termostatů se prakticky nemění – SYNC stačí jednou za hodinu.
 _DEVICES_CACHE_TTL_S = 3600.0
+
+# Prodleva před jediným opakováním čtení stavu po přechodném výpadku.
+_RETRY_DELAY_S = 1.0
 _devices_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 
 
@@ -306,48 +309,37 @@ async def fetch_poer_status_cached(
     session: aiohttp.ClientSession | None = None,
     ttl_seconds: float = _STATUS_CACHE_TTL_S,
 ) -> dict[str, Any]:
-    """Načte stav POER termostatu s krátkodobou cache a jedním retry pokusem.
+    """Stav jednoho termostatu ze společné krátkodobé cache všech termostatů.
 
-    Určeno pro čtecí endpointy volané z prohlížeče (dashboard, automatizace),
-    kde více téměř současných požadavků (např. ``loadPoerStatus`` +
-    ``loadWeatherConfig`` po odeslání příkazu, nebo více otevřených tabů)
-    by jinak zbytečně znásobilo volání cizího cloud API. Chyby v podobě
-    dočasného výpadku (síť, 5xx) se navíc jednou zopakují s krátkou
-    prodlevou, než se vrátí chybový stav volajícímu.
+    Určeno pro čtecí endpointy volané z prohlížeče (dashboard, automatizace).
+    Výběr termostatu nad sdílenou cache znamená, že načtení stránky (seznam
+    termostatů + stav vybraného + konfigurace počasí) stojí jediný QUERY,
+    a to i když je termostat offline. Přechodný výpadek (síť, 5xx) se jednou
+    zopakuje s krátkou prodlevou, než se vrátí chybový stav.
 
     Args:
         api_key:              POER API klíč (prefix cn/eu + token).
-        preferred_device_id:  Volitelné konkrétní zařízení.
-        session:               Volitelná sdílená aiohttp session.
-        ttl_seconds:           Platnost cache v sekundách.
+        preferred_device_id:  Volitelné konkrétní zařízení (jinak první na účtu).
+        session:              Volitelná sdílená aiohttp session.
+        ttl_seconds:          Platnost cache v sekundách.
 
     Returns:
-        dict[str, Any]: Stejná struktura jako ``fetch_poer_status``.
+        dict[str, Any]: Stejná struktura jako ``fetch_poer_status``; nikdy nevyhazuje.
     """
-    cache_key = f"{api_key}:{preferred_device_id or ''}"
-
-    async with _status_cache_lock:
-        cached = _status_cache.get(cache_key)
-        if cached is not None and (time.monotonic() - cached[0]) < ttl_seconds:
-            return cached[1]
-
-    result = await fetch_poer_status(
-        api_key=api_key, preferred_device_id=preferred_device_id, session=session
-    )
-
-    if result.get("error_text") is not None:
-        # Jeden retry pro přechodné výpadky (síť, 5xx) – nechceme uživateli
-        # hlásit chybu kvůli jednomu zahozenému paketu.
-        await asyncio.sleep(1.0)
-        result = await fetch_poer_status(
-            api_key=api_key, preferred_device_id=preferred_device_id, session=session
-        )
-
-    if result.get("error_text") is None:
-        async with _status_cache_lock:
-            _status_cache[cache_key] = (time.monotonic(), result)
-
-    return result
+    try:
+        try:
+            statuses = await fetch_poer_statuses_cached(api_key, session, ttl_seconds)
+        except PoerApiError:
+            await asyncio.sleep(_RETRY_DELAY_S)
+            statuses = await fetch_poer_statuses_cached(api_key, session, ttl_seconds)
+    except PoerApiError as exc:
+        return _empty_status(str(exc))
+    except Exception as exc:
+        return _empty_status(f"POER neocekavana chyba: {exc}")
+    for status in statuses:
+        if preferred_device_id and status["device_id"] == str(preferred_device_id):
+            return status
+    return statuses[0]
 
 
 async def fetch_poer_statuses_cached(
