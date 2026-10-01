@@ -132,6 +132,12 @@ def _proxy_offset_c() -> float:
     return float(rules.weather.ac_indoor_temperature_proxy_offset_c)
 
 
+def _cooling_season(now: datetime) -> bool:
+    """Je chladicí sezóna podle ``automation_rules.json`` (jen AC chladí, POER na minimu)?"""
+    rules, _ = load_automation_rules(_DATA_DIR / "automation_rules.json")
+    return get_season_for_datetime(now, rules) in rules.cooling_allowed_seasons
+
+
 def _create_zone_controller(app: FastAPI) -> ZoneController:
     """
     Vytvoří řízení zón nad ``data/zones.json`` a ``data/control.json``.
@@ -150,6 +156,7 @@ def _create_zone_controller(app: FastAPI) -> ZoneController:
         app.state.arbiter,
         weather_cache=lambda: getattr(app.state, "weather_cache", None),
         proxy_offset_c=_proxy_offset_c,
+        cooling_season=_cooling_season,
     )
     controller.reload()
     logger.info("🏠 Režim řízení: %s (zkušební provoz: %s)",

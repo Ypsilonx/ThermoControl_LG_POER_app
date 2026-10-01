@@ -111,6 +111,13 @@ zones, heaters (`poer:<id>` with `offset_c`, `lg:*`) and the sensor registry wit
 - `zones/loop.py` (`ZoneController`, `app.state.zones`) ticks every 60 s: sensors from caches (POER shared
   cache ≤ 2 min, LG status from MQTT/regulation, ČHMÚ cache, `http` sensors) → decision → journal →
   POER setpoints via the arbiter (only when the setpoint changes) and a zone target for AC regulation.
+- Source selection (`zones/sources.py`, pure): in a zone with an `lg` heater the POER heaters are
+  floor foil — low tariff (`zones/tariff.py`) → target + offset (full target on frost forecast),
+  high tariff → emergency minimum unless backup is needed (AC unavailable per arbiter health,
+  AC insufficient per indoor trend while heating, outdoor below `ac_min_outdoor_c`, emergency).
+  POER-only zones heat to target. Automation mode adds sun (`zones/sun.py`, `sun_side`) and
+  bathroom drying adjustments. Settings live in `control.json` (`sources`, `location`,
+  `automation.sun`, `automation.drying`).
 - **`dry_run` (default true)** = nothing is sent at all (neither POER nor AC regulation), only the journal.
 - A manual temperature change (web) outside `manual` creates a temporary override of the device's zone.
 - Legacy HAND/AUTO is derived: `manual` → HAND (HAND scheduler runs), other modes → AUTO

@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,7 +29,7 @@ ZONES_JSON = {
         "koupelna": {
             "name": "Koupelna",
             "heaters": [{"device": "poer:pb"}],
-            "roles": {"indoor_temperature": ["poer_b"]},
+            "roles": {"indoor_temperature": ["poer_b"], "indoor_humidity": ["poer_b"]},
         },
     },
     "sensors": {
@@ -40,11 +41,18 @@ ZONES_JSON = {
 NOW_LOCAL = datetime(2026, 10, 5, 10, 0)
 
 
-def _statuses(kitchen: float | None = 21.0, bathroom: float | None = 20.0) -> list[dict]:
+# Nízký tarif celý den – testy podprojektu 5 počítají s fólií na základu (cíl − 1 °C).
+ALL_DAY_NT = {"workday": [{"from": "00:00", "to": "23:59"}],
+              "weekend": [{"from": "00:00", "to": "23:59"}]}
+
+
+def _statuses(kitchen: float | None = 21.0, bathroom: float | None = 20.0,
+              bathroom_humidity: float = 50.0) -> list[dict]:
     """Stav obou termostatů; None = termostat offline."""
     return [
         {"device_id": "pk", "online": kitchen is not None, "current_temperature_c": kitchen},
-        {"device_id": "pb", "online": bathroom is not None, "current_temperature_c": bathroom},
+        {"device_id": "pb", "online": bathroom is not None, "current_temperature_c": bathroom,
+         "current_humidity_pct": bathroom_humidity},
     ]
 
 
@@ -53,6 +61,10 @@ class FakeArbiter:
 
     def __init__(self) -> None:
         self.requests = []
+        self.unavailable: set[str] = set()
+
+    def health(self, device_key: str):
+        return SimpleNamespace(available=device_key not in self.unavailable)
 
     async def submit(self, request):
         self.requests.append(request)
@@ -77,6 +89,7 @@ class ZoneControllerTests(unittest.IsolatedAsyncioTestCase):
 
     def _controller(self, mode: str = "automation", **changes) -> ZoneController:
         control = default_control(["kuchoobyvak", "koupelna"], mode)
+        control["sources"]["tariff"] = ALL_DAY_NT
         control.update(changes)
         save_control(self.control_path, control)
         controller = ZoneController(
@@ -219,6 +232,58 @@ class ZoneControllerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(controller.control["vacation"]["previous_mode"], "program")
         with self.assertRaises(ValueError):
             controller.set_mode("turbo")
+
+    def _high_tariff(self, controller: ZoneController) -> None:
+        """Přepne na vysoký tarif po celý den."""
+        controller.update_control({"sources": {"tariff": {"workday": [], "weekend": []}}})
+
+    async def test_high_tariff_switches_foil_off(self) -> None:
+        controller = self._controller(dry_run=False)
+        self._high_tariff(controller)
+        await self._tick(controller)
+        self.assertEqual(controller.zone_states["kuchoobyvak"]["setpoints"], {"poer:pk": 12.0})
+        self.assertEqual(controller.zone_states["koupelna"]["setpoints"], {"poer:pb": 21.0})
+        kitchen = [e for e in controller.journal if e["zone"] == "kuchoobyvak"][-1]
+        self.assertIn("VT", kitchen["actions"][0])
+
+    async def test_unavailable_ac_uses_foil_backup(self) -> None:
+        controller = self._controller(dry_run=False)
+        self._high_tariff(controller)
+        controller.record_lg_status("lg-dev", {"operation": {"airConOperationMode": "POWER_ON"}})
+        self.arbiter.unavailable.add("lg:lg-dev")
+        await self._tick(controller)
+        self.assertEqual(controller.zone_states["kuchoobyvak"]["setpoints"], {"poer:pk": 21.0})
+        self.assertIn("nedostupná", controller.zone_states["kuchoobyvak"]["sources"]["poer:pk"])
+
+    async def test_drying_raises_bathroom_target_in_automation(self) -> None:
+        self.fetch.return_value = _statuses(bathroom_humidity=80.0)
+        controller = self._controller(dry_run=False)
+        await self._tick(controller)
+        self.assertEqual(controller.zone_states["koupelna"]["setpoints"], {"poer:pb": 22.0})
+        self.assertIn("vysoušení", controller.zone_states["koupelna"]["reason"])
+
+    async def test_drying_not_in_program_mode(self) -> None:
+        self.fetch.return_value = _statuses(bathroom_humidity=80.0)
+        controller = self._controller("program", dry_run=False)
+        await self._tick(controller)
+        self.assertNotIn("vysoušení", controller.zone_states["koupelna"]["reason"])
+
+    async def test_cooling_season_keeps_poer_at_minimum(self) -> None:
+        controller = self._controller(dry_run=False)
+        controller._cooling_season = lambda now: True
+        await self._tick(controller)
+        self.assertEqual(controller.zone_states["koupelna"]["setpoints"], {"poer:pb": 12.0})
+        self.assertIn("léto", controller.zone_states["koupelna"]["sources"]["poer:pb"])
+
+    async def test_ac_heating_start_is_tracked(self) -> None:
+        controller = self._controller()
+        controller.record_lg_status("lg-dev", {"operation": {"airConOperationMode": "POWER_ON"},
+                                               "airConJobMode": {"currentJobMode": "HEAT"}})
+        await self._tick(controller)
+        self.assertIsNotNone(controller._ac_heating_since.get("lg-dev"))
+        controller.record_lg_status("lg-dev", {"operation": {"airConOperationMode": "POWER_OFF"}})
+        await self._tick(controller)
+        self.assertIsNone(controller._ac_heating_since.get("lg-dev"))
 
     async def test_legacy_mode_maps_manual_to_hand(self) -> None:
         self.assertEqual(self._controller("manual").legacy_mode, "HAND")

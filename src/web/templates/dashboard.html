@@ -681,8 +681,13 @@
                     <div class="text-sm text-gray-300" x-text="z.reason || '—'"></div>
                     <div class="text-xs text-red-400 mt-1" x-show="z.emergency">⚠️ Pod nouzovým minimem</div>
                     <div class="text-xs text-amber-400 mt-1" x-show="z.hold">⚠️ Chybí čerstvá vnitřní teplota – nic se nemění</div>
-                    <div class="text-xs text-gray-500 mt-1" x-show="z.setpoints && Object.keys(z.setpoints).length"
-                         x-text="'Termostat: ' + Object.values(z.setpoints || {}).map(v => v.toFixed(1) + '°C').join(', ')"></div>
+                    <template x-for="(sp, key) in (z.setpoints || {})" :key="key">
+                        <div class="text-xs text-gray-500 mt-1"
+                             x-text="'Termostat ' + sp.toFixed(1) + '°C' + ((z.sources || {})[key] ? ' – ' + z.sources[key] : '')"></div>
+                    </template>
+                    <div class="text-xs mt-1" x-show="z.low_tariff !== undefined"
+                         :class="z.low_tariff ? 'text-emerald-400' : 'text-gray-500'"
+                         x-text="(z.low_tariff ? '⚡ NT' : 'VT') + (z.outdoor_c != null ? ' · venku ' + z.outdoor_c.toFixed(1) + '°C' : '')"></div>
                     <div x-show="z.override" class="mt-3 flex items-center justify-between bg-amber-500/10 border border-amber-600/40 rounded-lg px-3 py-2">
                         <span class="text-xs text-amber-300"
                               x-text="z.override ? '✋ Přebití ' + z.override.target_c.toFixed(1) + '°C – zbývá ' + remaining(z.override.until) : ''"></span>

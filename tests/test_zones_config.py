@@ -145,6 +145,48 @@ class ControlConfigTests(unittest.TestCase):
         self.assertEqual(list(control["overrides"]), ["koupelna"])
 
 
+class SourcesConfigTests(unittest.TestCase):
+    def test_defaults(self) -> None:
+        control = default_control(ZONE_IDS, "automation")
+        sources = control["sources"]
+        self.assertEqual(sources["tariff"]["workday"], [{"from": "22:00", "to": "06:00"}])
+        self.assertEqual(sources["ac_min_outdoor_c"], -5.0)
+        self.assertTrue(sources["frost"]["enabled"])
+        self.assertTrue(control["automation"]["sun"]["enabled"])
+        self.assertTrue(control["automation"]["drying"]["enabled"])
+        self.assertEqual(control["location"], {"lat": 49.47, "lon": 17.97})
+
+    def test_old_file_without_sources_gets_defaults(self) -> None:
+        raw = default_control(ZONE_IDS, "program")
+        del raw["sources"], raw["location"], raw["automation"]["sun"], raw["automation"]["drying"]
+        control = normalize_control(raw, ZONE_IDS)
+        self.assertEqual(control["sources"]["tariff"]["weekend"],
+                         [{"from": "22:00", "to": "06:00"}])
+        self.assertEqual(control["automation"]["drying"]["humidity_pct"], 70.0)
+
+    def test_invalid_tariff_window_is_rejected(self) -> None:
+        raw = default_control(ZONE_IDS, "program")
+        raw["sources"]["tariff"]["workday"] = [{"from": "22:00", "to": "22:00"}]
+        with self.assertRaisesRegex(ValueError, "NT"):
+            normalize_control(raw, ZONE_IDS)
+
+    def test_drying_rearm_must_be_below_threshold(self) -> None:
+        raw = default_control(ZONE_IDS, "program")
+        raw["automation"]["drying"]["rearm_pct"] = 75
+        with self.assertRaises(ValueError):
+            normalize_control(raw, ZONE_IDS)
+
+    def test_zone_sun_side(self) -> None:
+        raw = json.loads(json.dumps(ZONES_RAW))
+        raw["zones"]["kuchoobyvak"]["sun_side"] = "east"
+        cfg = parse_zones(raw)
+        self.assertEqual(cfg.zones["kuchoobyvak"].sun_side, "east")
+        self.assertIsNone(cfg.zones["koupelna"].sun_side)
+        raw["zones"]["koupelna"]["sun_side"] = "sever"
+        with self.assertRaisesRegex(ValueError, "sever"):
+            parse_zones(raw)
+
+
 class ControlFileTests(unittest.TestCase):
     def setUp(self) -> None:
         self.dir = tempfile.TemporaryDirectory()

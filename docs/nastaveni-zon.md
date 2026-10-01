@@ -26,6 +26,7 @@ obsahuje jen obecnou šablonu, žádné konkrétní nastavení.
 | **Posun** (`offset_c`) | O kolik se setpoint termostatu liší od cíle zóny. Např. podlahová fólie jako základ topení: `-1` → při cíli 21 °C dostane termostat 20 °C. |
 | **Čidlo** | Zdroj hodnot: `poer` (teplota a vlhkost termostatu), `lg` (vnitřní čidlo klimatizace s korekcí), `chmi` (ČHMÚ), `http` (vlastní čidlo), `smart_plug` (zásuvka čerpadla krbu – zatím jen rozhraní). |
 | **Role** | K čemu zóna čidlo používá: vnitřní teplota, vnitřní vlhkost, venkovní teplota, krb topí. Pro každou roli je **seřazený seznam** čidel – použije se první, které má čerstvou hodnotu (výchozí limit 15 min, ČHMÚ 240 min). |
+| **Strana** (`sun_side`) | `east`/`west` – na kterou stranu domu zóna leží; podle ní Automatika snižuje cíl, když tam svítí slunce. |
 | **Nouzové minimum** | Pod tuto teplotu (výchozí 12 °C) zóna topí v každém režimu, i v Ručně. Termostaty POER nikdy nedostanou nižší cíl. |
 
 ## Režimy
@@ -41,6 +42,35 @@ Ruční změna teploty na webu v režimu Program/Automatika/Dovolená je **doča
 (v Programu do dalšího bloku, jinak na nastavitelnou dobu, výchozí 2 h). Zrušit jde tlačítkem
 na kartě zóny.
 
+### Úpravy cíle v Automatice
+
+- **☀️ Slunce** – zóna na východ: od 2 h před východem slunce do poledne; na západ: od poledne do
+  západu. Při průměrné oblačnosti v předpovědi pod 40 % se cíl sníží o 0,5 °C. Východ a západ slunce
+  se počítají ze souřadnic domu (Nastavení).
+- **💧 Vysoušení** – vlhkost nad 70 % → cíl +1 °C nejdéle 60 min; znovu až po poklesu pod 65 %.
+
+Všechny hodnoty se mění v záložce Automatika.
+
+## Tarif a volba zdroje tepla
+
+**Okna nízkého tarifu (NT)** se zadávají v Nastavení zvlášť pro pracovní den a víkend (výchozí
+orientačně 22:00–06:00; přepište podle HDO svého distributora).
+
+V zóně, kde je **klimatizace i POER topidlo** (typicky podlahová fólie), je klimatizace hlavní zdroj:
+
+| Situace | Fólie (POER) |
+|---|---|
+| NT | základ: cíl + posun topidla (např. −1 °C) |
+| NT + předpověď mrazu (do 12 h pod 0 °C) | plný cíl – nahřívá do zásoby |
+| VT | vypnuto (nouzové minimum), topí klimatizace |
+| VT a klimatizace nedostupná / nestačí (topí 30 min a teplota přesto klesla o 0,3 °C) / venku pod −5 °C | plný cíl – záloha |
+| pod nouzovým minimem | topí vždy |
+
+Zóna **jen s POER topidlem** (např. koupelna s kabelem) topí na cíl vždy.
+
+V **chladicí sezóně** (léto podle `automation_rules.json`) drží všechna POER topidla nouzové minimum – chladí jen klimatizace. Proč topidlo
+právě tak topí, ukazuje karta zóny na dashboardu a deník rozhodnutí.
+
 **Zkušební provoz** (výchozí): řízení počítá a zapisuje deník, ale **nic neposílá** – ani
 termostatům, ani klimatizaci.
 
@@ -51,7 +81,7 @@ Všechno je v adresáři `data/` (v Dockeru volume), **necommituje se** (`.gitig
 | Soubor | Obsah | Kdo ho mění |
 |---|---|---|
 | `data/zones.json` | Zóny, topidla, čidla, role | Záložka 🏠 Dům |
-| `data/control.json` | Režim, program, automatika, dovolená, přebití, prahy | Ostatní záložky a dashboard |
+| `data/control.json` | Režim, program, automatika, dovolená, přebití, tarif, prahy, souřadnice | Ostatní záložky a dashboard |
 
 Pro přenos na jiný server (např. z vývojového počítače do Dockeru) stačí oba soubory zkopírovat
 do `data/` – nemusíte nic proklikávat znovu. Když `control.json` chybí, vytvoří se s výchozím
@@ -66,6 +96,7 @@ Není potřeba, ale je možná. Formát ukazuje šablona `data/zones.json.exampl
   "zones": {
     "kuchoobyvak": {
       "name": "Kuchoobývák",
+      "sun_side": "east",
       "heaters": [{"device": "lg:*"}, {"device": "poer:ID_TERMOSTATU", "offset_c": -1.0}],
       "roles": {
         "indoor_temperature": ["poer_kuchoobyvak", "lg_klima"],

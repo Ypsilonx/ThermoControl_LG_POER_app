@@ -23,6 +23,7 @@ _DAY_NAMES = dict(zip(WEEKDAYS, ("pondělí", "úterý", "středa", "čtvrtek", 
                                  "neděle")))
 SENSOR_SOURCES = ("poer", "lg", "chmi", "http", "smart_plug")
 HEATER_KINDS = ("poer", "lg")
+SUN_SIDES = ("east", "west")
 
 # Rozsah cílových teplot zadávaných v aplikaci.
 TARGET_MIN_C = 5.0
@@ -32,6 +33,24 @@ TARGET_MAX_C = 30.0
 DEFAULT_COMFORT_C = 21.0
 DEFAULT_SETBACK_C = 19.0
 DEFAULT_AWAY_C = 15.0
+
+# Výchozí volba zdroje a tarif (spec kap. 6–7). Uživatel je mění v aplikaci (Řízení → Nastavení).
+DEFAULT_SOURCES = {
+    # Orientační okno NT, dokud uživatel nezadá skutečné časy HDO.
+    "tariff": {"workday": [{"from": "22:00", "to": "06:00"}],
+               "weekend": [{"from": "22:00", "to": "06:00"}]},
+    # Pod touto venkovní teplotou ztrácí AC výkon – fólie topí jako záloha i ve VT.
+    "ac_min_outdoor_c": -5.0,
+    # Předpověď mrazu → fólie v NT nahřívá na plný cíl (do zásoby).
+    "frost": {"enabled": True, "threshold_c": 0.0, "hours": 12},
+    # AC nestačí: topí aspoň `minutes` a teplota za tu dobu klesla o `drop_c`.
+    "ac_insufficient": {"minutes": 30, "drop_c": 0.3},
+}
+DEFAULT_SUN = {"enabled": True, "reduction_c": 0.5, "max_cloudiness_pct": 40.0, "lead_hours": 2.0}
+DEFAULT_DRYING = {"enabled": True, "humidity_pct": 70.0, "rearm_pct": 65.0, "boost_c": 1.0,
+                  "max_minutes": 60.0}
+# Souřadnice domu pro východ/západ slunce (výchozí Valašské Meziříčí).
+DEFAULT_LOCATION = {"lat": 49.47, "lon": 17.97}
 
 _TIME_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 # ID zóny a čidla: klíč v control.json a v URL (/api/control/override/<id>).
@@ -83,13 +102,15 @@ class Zone:
         id:      Identifikátor zóny
         name:    Zobrazovaný název
         heaters: Ovládaná topidla
-        roles:   Role → seřazené ID čidel (první čerstvé vyhrává)
+        roles:    Role → seřazené ID čidel (první čerstvé vyhrává)
+        sun_side: Strana domu pro úpravu cíle podle slunce (``east``/``west``) nebo None
     """
 
     id: str
     name: str
     heaters: tuple[Heater, ...]
     roles: dict[str, tuple[str, ...]]
+    sun_side: str | None = None
 
 
 @dataclass(frozen=True)
@@ -158,7 +179,10 @@ def parse_zones(raw: dict[str, Any]) -> ZonesConfig:
                 if sid not in sensors:
                     raise ValueError(f"Zóna {zone_id}, role {role}: neznámé čidlo '{sid}'.")
             roles[role] = tuple(sensor_ids)
-        zones[zone_id] = Zone(zone_id, str(z.get("name") or zone_id), heaters, roles)
+        sun_side = z.get("sun_side") or None
+        if sun_side is not None and sun_side not in SUN_SIDES:
+            raise ValueError(f"Zóna {zone_id}: neznámá strana '{sun_side}' (east/west).")
+        zones[zone_id] = Zone(zone_id, str(z.get("name") or zone_id), heaters, roles, sun_side)
     if not zones:
         raise ValueError("zones.json neobsahuje žádnou zónu.")
     return ZonesConfig(zones, sensors)
@@ -259,6 +283,8 @@ def default_control(zone_ids: list[str], mode: str) -> dict[str, Any]:
         "automation": {
             "targets": {z: DEFAULT_COMFORT_C for z in zone_ids},
             "night_setback": {"enabled": False, "from": "22:00", "to": "05:30", "delta_c": 2.0},
+            "sun": dict(DEFAULT_SUN),
+            "drying": dict(DEFAULT_DRYING),
         },
         "vacation": {
             "return_at": None,
@@ -267,6 +293,8 @@ def default_control(zone_ids: list[str], mode: str) -> dict[str, Any]:
             "previous_mode": "automation",
         },
         "overrides": {},
+        "sources": json.loads(json.dumps(DEFAULT_SOURCES)),
+        "location": dict(DEFAULT_LOCATION),
     }
 
 
@@ -351,6 +379,79 @@ def _normalize_overrides(raw: Any, zone_ids: list[str]) -> dict[str, dict]:
     }
 
 
+def _with_defaults(raw: Any, defaults: dict) -> dict:
+    """Slovník ``raw`` doplněný o chybějící klíče z ``defaults`` (starší soubory)."""
+    return {**defaults, **(raw if isinstance(raw, dict) else {})}
+
+
+def _normalize_tariff(raw: Any) -> dict[str, list[dict]]:
+    """Ověří okna NT pro pracovní den a víkend."""
+    tariff = _with_defaults(raw, DEFAULT_SOURCES["tariff"])
+    result = {}
+    for day_type, label in (("workday", "pracovní den"), ("weekend", "víkend")):
+        windows = []
+        for w in tariff[day_type] or []:
+            start = _time(w.get("from"), f"Tarif NT ({label})")
+            end = _time(w.get("to"), f"Tarif NT ({label})")
+            if start == end:
+                raise ValueError(f"Tarif NT ({label}): okno {start}–{end} nemá délku.")
+            windows.append({"from": start, "to": end})
+        result[day_type] = windows
+    return result
+
+
+def _normalize_sources(raw: Any) -> dict[str, Any]:
+    """Ověří tarif a prahy volby zdroje (fólie jako záloha AC)."""
+    sources = _with_defaults(raw, DEFAULT_SOURCES)
+    frost = _with_defaults(sources["frost"], DEFAULT_SOURCES["frost"])
+    insufficient = _with_defaults(sources["ac_insufficient"], DEFAULT_SOURCES["ac_insufficient"])
+    return {
+        "tariff": _normalize_tariff(sources["tariff"]),
+        "ac_min_outdoor_c": _number(sources, "ac_min_outdoor_c", -30, 15),
+        "frost": {
+            "enabled": bool(frost["enabled"]),
+            "threshold_c": _number(frost, "threshold_c", -20, 10),
+            "hours": _number(frost, "hours", 1, 48),
+        },
+        "ac_insufficient": {
+            "minutes": _number(insufficient, "minutes", 10, 180),
+            "drop_c": _number(insufficient, "drop_c", 0.1, 3),
+        },
+    }
+
+
+def _normalize_sun(raw: Any) -> dict[str, Any]:
+    """Ověří úpravu cíle podle slunce."""
+    sun = _with_defaults(raw, DEFAULT_SUN)
+    return {
+        "enabled": bool(sun["enabled"]),
+        "reduction_c": _number(sun, "reduction_c", 0, 3),
+        "max_cloudiness_pct": _number(sun, "max_cloudiness_pct", 0, 100),
+        "lead_hours": _number(sun, "lead_hours", 0, 6),
+    }
+
+
+def _normalize_drying(raw: Any) -> dict[str, Any]:
+    """Ověří vysoušení koupelny (návrat musí být pod prahem, jinak by se spínalo dokola)."""
+    drying = _with_defaults(raw, DEFAULT_DRYING)
+    result = {
+        "enabled": bool(drying["enabled"]),
+        "humidity_pct": _number(drying, "humidity_pct", 40, 100),
+        "rearm_pct": _number(drying, "rearm_pct", 30, 100),
+        "boost_c": _number(drying, "boost_c", 0, 5),
+        "max_minutes": _number(drying, "max_minutes", 5, 240),
+    }
+    if result["rearm_pct"] >= result["humidity_pct"]:
+        raise ValueError("Vysoušení: vlhkost pro opětovné zapnutí musí být pod prahem.")
+    return result
+
+
+def _normalize_location(raw: Any) -> dict[str, float]:
+    """Ověří souřadnice domu."""
+    location = _with_defaults(raw, DEFAULT_LOCATION)
+    return {"lat": _number(location, "lat", -90, 90), "lon": _number(location, "lon", -180, 180)}
+
+
 def normalize_control(raw: dict[str, Any], zone_ids: list[str]) -> dict[str, Any]:
     """
     Zvaliduje a doplní ``control.json`` (např. po úpravě z API).
@@ -390,9 +491,13 @@ def normalize_control(raw: dict[str, Any], zone_ids: list[str]) -> dict[str, Any
                 "to": _time(setback.get("to", "05:30"), "Noční útlum"),
                 "delta_c": _number({"delta_c": 2.0, **setback}, "delta_c", 0, 10),
             },
+            "sun": _normalize_sun(automation.get("sun")),
+            "drying": _normalize_drying(automation.get("drying")),
         },
         "vacation": vacation,
         "overrides": _normalize_overrides(raw.get("overrides"), zone_ids),
+        "sources": _normalize_sources(raw.get("sources")),
+        "location": _normalize_location(raw.get("location")),
     }
 
 

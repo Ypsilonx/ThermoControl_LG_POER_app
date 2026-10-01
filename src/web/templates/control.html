@@ -58,6 +58,13 @@
                     <input type="text" x-model="z.name" @input="if (z.isNew) z.id = uniqueZoneId(slugify(z.name), zi)"
                            class="bg-gray-900 border border-gray-600 rounded px-2 py-1 text-gray-100 font-semibold">
                     <span class="text-xs text-gray-500" x-text="'ID: ' + z.id"></span>
+                    <label class="text-xs text-gray-400" title="Pro snížení cíle, když na tuto stranu domu svítí slunce">strana
+                        <select x-model="z.sun_side" class="ml-1 bg-gray-900 border border-gray-600 rounded px-2 py-1 text-gray-100 text-xs">
+                            <option value="">—</option>
+                            <option value="east">☀️ východ</option>
+                            <option value="west">🌇 západ</option>
+                        </select>
+                    </label>
                     <button @click="house.zones.splice(zi, 1)" class="ml-auto text-xs text-red-400 hover:text-red-300">Odebrat zónu</button>
                 </div>
 
@@ -213,7 +220,36 @@
                                 x-model.number="config.automation.night_setback.delta_c"
                                 class="ml-1 w-20 bg-gray-900 border border-gray-600 rounded px-2 py-1 text-gray-100"> °C níž</label>
             </div>
-            <p class="text-xs text-gray-500">Úpravy podle slunce, předpovědi a vysoušení koupelny přijdou v dalším kroku.</p>
+        </div>
+        <div class="bg-gray-800 border border-gray-700 rounded-xl p-4 space-y-3 text-sm text-gray-300" x-show="config.automation.sun">
+            <label class="flex items-center gap-2 text-gray-200">
+                <input type="checkbox" x-model="config.automation.sun.enabled"> ☀️ Snížit cíl, když na zónu svítí slunce
+            </label>
+            <p class="text-xs text-gray-500">Zóna na východ: od N hodin před východem slunce do poledne; na západ: od poledne do západu.
+                Stranu zóny nastavíte v záložce Dům. Platí jen za jasna podle předpovědi.</p>
+            <div class="flex flex-wrap gap-4">
+                <label>o <input type="number" step="0.5" min="0" max="3" x-model.number="config.automation.sun.reduction_c"
+                                class="ml-1 w-16 bg-gray-900 border border-gray-600 rounded px-2 py-1 text-gray-100"> °C</label>
+                <label>oblačnost pod <input type="number" step="5" min="0" max="100" x-model.number="config.automation.sun.max_cloudiness_pct"
+                                            class="ml-1 w-16 bg-gray-900 border border-gray-600 rounded px-2 py-1 text-gray-100"> %</label>
+                <label>předstih <input type="number" step="0.5" min="0" max="6" x-model.number="config.automation.sun.lead_hours"
+                                       class="ml-1 w-16 bg-gray-900 border border-gray-600 rounded px-2 py-1 text-gray-100"> h před východem</label>
+            </div>
+        </div>
+        <div class="bg-gray-800 border border-gray-700 rounded-xl p-4 space-y-3 text-sm text-gray-300" x-show="config.automation.drying">
+            <label class="flex items-center gap-2 text-gray-200">
+                <input type="checkbox" x-model="config.automation.drying.enabled"> 💧 Vysoušení při vysoké vlhkosti (proti plísni)
+            </label>
+            <div class="flex flex-wrap gap-4">
+                <label>nad <input type="number" step="1" min="40" max="100" x-model.number="config.automation.drying.humidity_pct"
+                                  class="ml-1 w-16 bg-gray-900 border border-gray-600 rounded px-2 py-1 text-gray-100"> %</label>
+                <label>cíl + <input type="number" step="0.5" min="0" max="5" x-model.number="config.automation.drying.boost_c"
+                                    class="ml-1 w-16 bg-gray-900 border border-gray-600 rounded px-2 py-1 text-gray-100"> °C</label>
+                <label>nejdéle <input type="number" step="5" min="5" max="240" x-model.number="config.automation.drying.max_minutes"
+                                      class="ml-1 w-16 bg-gray-900 border border-gray-600 rounded px-2 py-1 text-gray-100"> min</label>
+                <label>znovu až pod <input type="number" step="1" min="30" max="100" x-model.number="config.automation.drying.rearm_pct"
+                                           class="ml-1 w-16 bg-gray-900 border border-gray-600 rounded px-2 py-1 text-gray-100"> %</label>
+            </div>
         </div>
         <button @click="save({ automation: config.automation }, 'Automatika uložena.')"
                 class="px-5 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white font-semibold">Uložit automatiku</button>
@@ -272,8 +308,56 @@
                 Mimo zkušební provoz posílá aplikace termostatům POER a klimatizaci skutečné příkazy.
             </p>
         </div>
+        <div class="bg-gray-800 border border-gray-700 rounded-xl p-4 space-y-3 text-sm text-gray-300" x-show="config.sources">
+            <div class="font-semibold text-gray-100">⚡ Tarif – okna nízkého tarifu (NT)</div>
+            <p class="text-xs text-gray-500">Časy podle HDO vašeho distributora. Okno může přecházet přes půlnoc (např. 22:00–06:00).</p>
+            <template x-for="dt in [{id: 'workday', label: 'Pracovní den'}, {id: 'weekend', label: 'Víkend'}]" :key="dt.id">
+                <div>
+                    <div class="text-xs text-gray-400 mb-1" x-text="dt.label"></div>
+                    <template x-for="(w, wi) in config.sources.tariff[dt.id]" :key="wi">
+                        <div class="flex items-center gap-2 mb-1">
+                            <input type="time" x-model="w.from" class="bg-gray-900 border border-gray-600 rounded px-2 py-1 text-gray-100"> –
+                            <input type="time" x-model="w.to" class="bg-gray-900 border border-gray-600 rounded px-2 py-1 text-gray-100">
+                            <button @click="config.sources.tariff[dt.id].splice(wi, 1)" class="text-xs text-red-400 hover:text-red-300">✕</button>
+                        </div>
+                    </template>
+                    <button @click="config.sources.tariff[dt.id].push({from: '22:00', to: '06:00'})"
+                            class="text-xs text-blue-400 hover:text-blue-300">+ okno</button>
+                </div>
+            </template>
+        </div>
+        <div class="bg-gray-800 border border-gray-700 rounded-xl p-4 space-y-3 text-sm text-gray-300" x-show="config.sources">
+            <div class="font-semibold text-gray-100">🔥 Volba zdroje (zóna s klimatizací a fólií)</div>
+            <p class="text-xs text-gray-500">V NT drží fólie základ (cíl + posun topidla). Ve VT topí jen klimatizace;
+                fólie ji zastoupí, když je nedostupná, nestačí, nebo je venku příliš zima.</p>
+            <label class="flex items-center justify-between max-w-md">AC ztrácí výkon pod venkovní teplotou
+                <span><input type="number" step="1" min="-30" max="15" x-model.number="config.sources.ac_min_outdoor_c" class="w-20 bg-gray-900 border border-gray-600 rounded px-2 py-1 text-gray-100"> °C</span>
+            </label>
+            <label class="flex items-center justify-between max-w-md">AC nestačí: topí aspoň
+                <span><input type="number" step="5" min="10" max="180" x-model.number="config.sources.ac_insufficient.minutes" class="w-20 bg-gray-900 border border-gray-600 rounded px-2 py-1 text-gray-100"> min</span>
+            </label>
+            <label class="flex items-center justify-between max-w-md">… a teplota přesto klesla o
+                <span><input type="number" step="0.1" min="0.1" max="3" x-model.number="config.sources.ac_insufficient.drop_c" class="w-20 bg-gray-900 border border-gray-600 rounded px-2 py-1 text-gray-100"> °C</span>
+            </label>
+            <label class="flex items-center gap-2 pt-2 border-t border-gray-700">
+                <input type="checkbox" x-model="config.sources.frost.enabled">
+                <span>❄️ Při předpovědi mrazu nahřívat fólii v NT na plný cíl</span>
+            </label>
+            <div class="flex flex-wrap gap-4">
+                <label>mráz = pod <input type="number" step="0.5" min="-20" max="10" x-model.number="config.sources.frost.threshold_c" class="ml-1 w-16 bg-gray-900 border border-gray-600 rounded px-2 py-1 text-gray-100"> °C</label>
+                <label>v příštích <input type="number" step="1" min="1" max="48" x-model.number="config.sources.frost.hours" class="ml-1 w-16 bg-gray-900 border border-gray-600 rounded px-2 py-1 text-gray-100"> h</label>
+            </div>
+        </div>
+        <div class="bg-gray-800 border border-gray-700 rounded-xl p-4 space-y-3 text-sm text-gray-300" x-show="config.location">
+            <div class="font-semibold text-gray-100">📍 Poloha domu (východ a západ slunce)</div>
+            <div class="flex flex-wrap gap-4">
+                <label>šířka <input type="number" step="0.01" min="-90" max="90" x-model.number="config.location.lat" class="ml-1 w-24 bg-gray-900 border border-gray-600 rounded px-2 py-1 text-gray-100"> °</label>
+                <label>délka <input type="number" step="0.01" min="-180" max="180" x-model.number="config.location.lon" class="ml-1 w-24 bg-gray-900 border border-gray-600 rounded px-2 py-1 text-gray-100"> °</label>
+            </div>
+        </div>
         <button @click="save({ emergency_min_c: config.emergency_min_c, override_hours: config.override_hours,
-                               sensor_max_age_min: config.sensor_max_age_min, dry_run: config.dry_run },
+                               sensor_max_age_min: config.sensor_max_age_min, dry_run: config.dry_run,
+                               sources: config.sources, location: config.location },
                              'Nastavení uloženo.')"
                 class="px-5 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white font-semibold">Uložit nastavení</button>
     </div>
@@ -333,8 +417,10 @@ document.addEventListener('alpine:init', () => {
         mode: 'manual',
         zonesConfigured: true,
         zones: [],
-        config: { program: {}, automation: { targets: {}, night_setback: {} },
-                  vacation: { away_targets: {} } },
+        config: { program: {}, automation: { targets: {}, night_setback: {}, sun: {}, drying: {} },
+                  vacation: { away_targets: {} },
+                  sources: { tariff: { workday: [], weekend: [] }, frost: {}, ac_insufficient: {} },
+                  location: {} },
         vacationReturn: '',
         copyTargets: [],
         journal: [],
@@ -373,7 +459,7 @@ document.addEventListener('alpine:init', () => {
         _fromRaw(raw) {
             const roleIds = this.roles.map(r => r.id);
             this.house.zones = Object.entries(raw.zones || {}).map(([id, z]) => ({
-                id, name: z.name || id, isNew: false,
+                id, name: z.name || id, isNew: false, sun_side: z.sun_side || '',
                 heaters: (z.heaters || []).map(h => ({ device: h.device, offset_c: h.offset_c || 0 })),
                 roles: Object.fromEntries(roleIds.map(r => [r, [...((z.roles || {})[r] || [])]])),
             }));
@@ -385,6 +471,7 @@ document.addEventListener('alpine:init', () => {
             for (const z of this.house.zones) {
                 const roles = Object.fromEntries(Object.entries(z.roles).filter(([, ids]) => ids.length));
                 zones[z.id] = { name: z.name, heaters: z.heaters, roles };
+                if (z.sun_side) zones[z.id].sun_side = z.sun_side;
             }
             const sensors = {};
             for (const { id, ...s } of this.house.sensors) sensors[id] = s;
@@ -449,7 +536,7 @@ document.addEventListener('alpine:init', () => {
 
         addZone() {
             const name = 'Nová zóna';
-            this.house.zones.push({ id: this.uniqueZoneId(this.slugify(name), -1), name, isNew: true,
+            this.house.zones.push({ id: this.uniqueZoneId(this.slugify(name), -1), name, isNew: true, sun_side: '',
                                     heaters: [], roles: Object.fromEntries(this.roles.map(r => [r.id, []])) });
         },
 

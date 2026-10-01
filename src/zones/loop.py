@@ -10,6 +10,7 @@ Setpoint se posílá jen při změně, takže ustálený stav nestojí žádné 
 import asyncio
 import logging
 from collections import deque
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -25,7 +26,7 @@ from zones.config import (
     save_control,
     save_zones,
 )
-from zones.decide import ZoneDecision, decide_zone, override_until
+from zones.decide import ZoneDecision, active_override, decide_zone, override_until
 from zones.sensors import (
     SensorValues,
     chmi_values,
@@ -34,6 +35,17 @@ from zones.sensors import (
     poer_values,
     resolve_role,
 )
+from zones.sources import (
+    DryingState,
+    SourceContext,
+    ac_insufficient,
+    drying_adjustment,
+    frost_expected,
+    heater_setpoint,
+    sun_adjustment,
+)
+from zones.sun import sun_times
+from zones.tariff import is_low_tariff
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +55,9 @@ POER_MAX_AGE_S = 120.0
 # Po selhání se stejný setpoint zkusí znovu nejdřív za tuto dobu (šetří API při výpadku).
 RETRY_AFTER_FAILURE = timedelta(minutes=10)
 JOURNAL_SIZE = 200
+# Jak dlouhou historii vnitřní teploty zóny držet (pro „AC nestačí“).
+INDOOR_HISTORY = timedelta(hours=2)
+
 # Klíče control.json, které update_control nahrazuje celé (jinak by nešlo mazat položky).
 _REPLACED_KEYS = {"program", "overrides"}
 
@@ -76,6 +91,7 @@ class ZoneController:
         weather_cache: Callable[[], dict | None] = lambda: None,
         proxy_offset_c: Callable[[], float] = lambda: 0.0,
         local_now: Callable[[], datetime] = datetime.now,
+        cooling_season: Callable[[datetime], bool] = lambda now: False,
     ) -> None:
         """
         Args:
@@ -87,6 +103,7 @@ class ZoneController:
             weather_cache:  Vrací aktuální cache počasí (zdroj ``chmi``)
             proxy_offset_c: Vrací korekci vnitřního čidla AC (zdroj ``lg``)
             local_now:      Místní čas (pro testy)
+            cooling_season: Je v daný okamžik chladicí sezóna (léto)? POER pak drží minimum.
         """
         self._zones_path = zones_path
         self._control_path = control_path
@@ -96,6 +113,7 @@ class ZoneController:
         self._weather_cache = weather_cache
         self._proxy_offset_c = proxy_offset_c
         self._local_now = local_now
+        self._cooling_season = cooling_season
         self.zones: ZonesConfig | None = None
         self.control: dict = {}
         self.zone_states: dict[str, dict] = {}
@@ -107,6 +125,10 @@ class ZoneController:
         self._sent: dict[str, tuple[float, datetime | None]] = {}
         self._tasks: set[asyncio.Task] = set()
         self._wake = asyncio.Event()
+        # Volba zdroje: historie vnitřní teploty, vysoušení, od kdy AC topí.
+        self._indoor_history: dict[str, deque[tuple[datetime, float]]] = {}
+        self._drying: dict[str, DryingState] = {}
+        self._ac_heating_since: dict[str, datetime | None] = {}
 
     # ── konfigurace ──────────────────────────────────────────────
 
@@ -344,31 +366,41 @@ class ZoneController:
                              "indoor_sensor": None, "actions": [],
                              "dry_run": self.control["dry_run"]})
 
-    def _actions_for(self, zone, decision: ZoneDecision, now_utc: datetime
-                     ) -> tuple[dict[str, float], list[tuple[str, str, float]]]:
+    def _actions_for(self, zone, decision: ZoneDecision, ctx: SourceContext, now_utc: datetime
+                     ) -> tuple[dict[str, float], dict[str, str], list[tuple[str, str, float]]]:
         """
-        Spočítá setpointy POER topidel zóny a vybere ty, které je třeba poslat.
+        Spočítá setpointy POER topidel zóny (volba zdroje) a vybere ty, které je třeba poslat.
 
         Returns:
-            tuple: (všechny setpointy podle klíče zařízení, [(klíč, device_id, setpoint)])
+            tuple: (setpointy podle klíče zařízení, důvody podle klíče,
+                    [(klíč, device_id, setpoint)] k odeslání)
         """
         setpoints: dict[str, float] = {}
+        reasons: dict[str, str] = {}
         to_send = []
         if decision.target_c is None or decision.hold:
-            return setpoints, to_send
+            return setpoints, reasons, to_send
         minimum = self.control["emergency_min_c"]
+        has_ac = any(h.kind == "lg" for h in zone.heaters)
+        # V létě chladí jen klimatizace; POER topidla drží nouzové minimum (spec kap. 6).
+        summer = self._cooling_season(self._local_now()) and not decision.emergency
         for heater in zone.heaters:
             if heater.kind != "poer" or not heater.device_id:
                 continue
             key = poer_device_key(heater.device_id)
-            setpoint = _round_half(max(decision.target_c + heater.offset_c, minimum))
+            if summer:
+                raw, reasons[key] = minimum, "léto – topidlo na nouzovém minimu"
+            else:
+                raw, reasons[key] = heater_setpoint(heater, has_ac, decision, ctx, minimum,
+                                                    self.control["sources"])
+            setpoint = _round_half(raw)
             setpoints[key] = setpoint
             last = self._sent.get(key)
             if last is not None and last[0] == setpoint and (
                     last[1] is None or now_utc - last[1] < RETRY_AFTER_FAILURE):
                 continue
             to_send.append((key, heater.device_id, setpoint))
-        return setpoints, to_send
+        return setpoints, reasons, to_send
 
     async def _send(self, key: str, device_id: str, setpoint: float,
                     source: CommandSource) -> None:
@@ -403,7 +435,8 @@ class ZoneController:
             await asyncio.gather(*list(self._tasks), return_exceptions=True)
 
     def _zone_state(self, zone, decision: ZoneDecision, indoor, humidity,
-                    setpoints: dict[str, float]) -> dict:
+                    setpoints: dict[str, float], reasons: dict[str, str],
+                    ctx: SourceContext) -> dict:
         """Stav zóny pro API/UI."""
         return {
             "id": zone.id,
@@ -419,6 +452,9 @@ class ZoneController:
             "humidity_pct": humidity.value if humidity else None,
             "override": self.control["overrides"].get(zone.id),
             "setpoints": setpoints,
+            "sources": reasons,
+            "low_tariff": ctx.low_tariff,
+            "outdoor_c": ctx.outdoor_c,
         }
 
     async def tick(self) -> None:
@@ -431,16 +467,23 @@ class ZoneController:
         values = await self._collect(now_utc)
         max_age = self.control["sensor_max_age_min"]
         dry_run = self.control["dry_run"]
+        self._track_ac_heating(now_utc)
+        hourly = (self._weather_cache() or {}).get("hourly") or []
         for zone in self.zones.zones.values():
             sensors = self.zones.sensors
             indoor = resolve_role(zone, "indoor_temperature", sensors, values, now_utc, max_age)
             humidity = resolve_role(zone, "indoor_humidity", sensors, values, now_utc, max_age)
+            outdoor = resolve_role(zone, "outdoor_temperature", sensors, values, now_utc, max_age)
             plug = resolve_role(zone, "fireplace", sensors, values, now_utc, max_age)
+            self._remember_indoor(zone.id, indoor, now_utc)
             decision = decide_zone(zone.id, self.control, indoor.value if indoor else None,
                                    bool(plug.value) if plug else None, now)
+            decision = self._adjust_target(zone, decision, humidity, now, hourly)
             self._decisions[zone.id] = decision
-            setpoints, to_send = self._actions_for(zone, decision, now_utc)
-            actions = [f"{device_id} → {sp} °C" for _, device_id, sp in to_send]
+            ctx = self._source_context(zone, decision, outdoor, now, now_utc, hourly)
+            setpoints, reasons, to_send = self._actions_for(zone, decision, ctx, now_utc)
+            actions = [f"{device_id} → {sp} °C ({reasons[key]})"
+                       for key, device_id, sp in to_send]
             has_override = zone.id in self.control["overrides"]
             source = _command_source(self.control, decision, has_override)
             for key, device_id, setpoint in to_send:
@@ -450,8 +493,98 @@ class ZoneController:
                 else:
                     self._dispatch(key, device_id, setpoint, source)
             self.zone_states[zone.id] = self._zone_state(zone, decision, indoor, humidity,
-                                                         setpoints)
+                                                         setpoints, reasons, ctx)
             self._journal(now, zone.id, decision, indoor, actions)
+
+    # ── volba zdroje a úpravy cíle ───────────────────────────────
+
+    @staticmethod
+    def _is_heating(status: dict) -> bool:
+        """Topí klimatizace (zapnutá v režimu HEAT)?"""
+        power = (status.get("operation") or {}).get("airConOperationMode")
+        mode = (status.get("airConJobMode") or {}).get("currentJobMode")
+        return power == "POWER_ON" and mode == "HEAT"
+
+    def _track_ac_heating(self, now_utc: datetime) -> None:
+        """Zapamatuje si, od kdy která klimatizace nepřetržitě topí."""
+        for device_id, (_, status) in self.lg_statuses.items():
+            if self._is_heating(status):
+                if self._ac_heating_since.get(device_id) is None:
+                    self._ac_heating_since[device_id] = now_utc
+            else:
+                self._ac_heating_since[device_id] = None
+
+    def _remember_indoor(self, zone_id: str, indoor, now_utc: datetime) -> None:
+        """Přidá vnitřní teplotu do historie zóny a zahodí staré hodnoty."""
+        history = self._indoor_history.setdefault(zone_id, deque())
+        if indoor is not None:
+            history.append((now_utc, indoor.value))
+        while history and now_utc - history[0][0] > INDOOR_HISTORY:
+            history.popleft()
+
+    def _zone_ac_ids(self, zone) -> list[str]:
+        """ThinQ ID klimatizací zóny (``lg:*`` = všechny se známým stavem)."""
+        ids: list[str] = []
+        for heater in zone.heaters:
+            if heater.kind == "lg":
+                ids.extend([heater.device_id] if heater.device_id else self.lg_statuses)
+        return ids
+
+    def _adjust_target(self, zone, decision: ZoneDecision, humidity, now: datetime,
+                       hourly: list[dict]) -> ZoneDecision:
+        """
+        Úpravy cíle v Automatice: slunce a vysoušení (spec kap. 2.2).
+
+        Neplatí při přebití, nouzi, pozastavení ani bez vnitřní teploty.
+        """
+        drying_state = self._drying.get(zone.id, DryingState())
+        applicable = (self.control["mode"] == "automation" and decision.target_c is not None
+                      and not (decision.emergency or decision.paused or decision.hold)
+                      and active_override(self.control, zone.id, now) is None)
+        if not applicable:
+            self._drying[zone.id] = DryingState(armed=drying_state.armed)
+            return decision
+        automation = self.control["automation"]
+        delta_dry, why_dry, self._drying[zone.id] = drying_adjustment(
+            humidity.value if humidity else None, automation["drying"], drying_state, now)
+        delta_sun, why_sun = 0.0, None
+        if zone.sun_side:
+            local = now.astimezone()
+            location = self.control["location"]
+            try:
+                sunrise, sunset = sun_times(local.date(), location["lat"], location["lon"],
+                                            local.tzinfo)
+                delta_sun, why_sun = sun_adjustment(zone.sun_side, automation["sun"], local,
+                                                    sunrise, sunset, hourly)
+            except ValueError:
+                pass
+        parts = [p for p in (why_sun, why_dry) if p]
+        if not parts:
+            return decision
+        return replace(decision, target_c=decision.target_c + delta_sun + delta_dry,
+                       reason=f"{decision.reason} · {' · '.join(parts)}")
+
+    def _source_context(self, zone, decision: ZoneDecision, outdoor, now: datetime,
+                        now_utc: datetime, hourly: list[dict]) -> SourceContext:
+        """Tarif, venkovní teplota, předpověď mrazu a stav klimatizace pro volbu zdroje."""
+        sources = self.control["sources"]
+        frost = sources["frost"]
+        ac_ids = self._zone_ac_ids(zone)
+        health = getattr(self._arbiter, "health", None)
+        available = all(health(f"lg:{i}").available for i in ac_ids) if health else True
+        history = list(self._indoor_history.get(zone.id, ()))
+        insufficient = any(
+            ac_insufficient(history, self._ac_heating_since.get(i), decision.target_c, now_utc,
+                            sources["ac_insufficient"])
+            for i in ac_ids) if decision.target_c is not None else False
+        return SourceContext(
+            low_tariff=is_low_tariff(sources["tariff"], now),
+            outdoor_c=outdoor.value if outdoor else None,
+            frost_expected=frost["enabled"] and frost_expected(
+                hourly, now_utc, frost["hours"], frost["threshold_c"]),
+            ac_available=available,
+            ac_insufficient=insufficient,
+        )
 
     def _journal(self, now: datetime, zone_id: str, decision: ZoneDecision, indoor,
                  actions: list[str]) -> None:

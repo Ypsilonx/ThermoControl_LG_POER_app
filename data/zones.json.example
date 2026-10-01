@@ -2,6 +2,7 @@
   "zones": {
     "kuchoobyvak": {
       "name": "Kuchoobývák",
+      "sun_side": "east",
       "heaters": [
         {"device": "lg:*"},
         {"device": "poer:YOUR_POER_KITCHEN_ID", "offset_c": -1.0}
@@ -14,6 +15,7 @@
     },
     "koupelna": {
       "name": "Koupelna",
+      "sun_side": "west",
       "heaters": [
         {"device": "poer:YOUR_POER_BATHROOM_ID"}
       ],

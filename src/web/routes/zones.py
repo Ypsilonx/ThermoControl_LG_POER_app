@@ -34,7 +34,7 @@ router = APIRouter(prefix="/api/control", tags=["Řízení zón"])
 # Klíče control.json, které lze měnit přes PUT /config (režim má vlastní endpoint).
 _EDITABLE_KEYS = frozenset({
     "dry_run", "emergency_min_c", "sensor_max_age_min", "override_hours",
-    "program", "automation", "vacation",
+    "program", "automation", "vacation", "sources", "location",
 })
 
 
