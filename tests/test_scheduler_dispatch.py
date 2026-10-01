@@ -43,5 +43,13 @@ class SchedulerDispatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(app.state.background_tasks, set())
 
 
+class SchedulerGateTests(unittest.TestCase):
+    def test_runs_only_in_hand_mode_with_enabled_settings(self) -> None:
+        on = {"enable_scheduler": True, "auto_execute": True}
+        self.assertTrue(web_app._scheduler_enabled("HAND", on))
+        self.assertFalse(web_app._scheduler_enabled("AUTO", on))
+        self.assertFalse(web_app._scheduler_enabled("HAND", {**on, "auto_execute": False}))
+
+
 if __name__ == "__main__":
     unittest.main()

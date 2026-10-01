@@ -494,6 +494,27 @@ async def _mqtt_watchdog_loop(app: FastAPI, on_message) -> None:
             logger.error("❌ MQTT watchdog: neočekávaná chyba: %s", exc)
 
 
+def _scheduler_enabled(control_mode: str, settings: dict) -> bool:
+    """
+    Rozhodne, zda má plánovač v této minutě spouštět akce.
+
+    Plánovač patří k režimu HAND. V AUTO řídí klimatizaci automatika a obě by
+    posílaly příkazy se stejným klíčem a prioritou – navzájem by se přepisovaly.
+
+    Args:
+        control_mode: ``"AUTO"`` nebo ``"HAND"``
+        settings:     Sekce ``settings`` ze schedule.json
+
+    Returns:
+        bool: True pokud je režim HAND a zapnuté ``enable_scheduler`` i ``auto_execute``
+    """
+    return (
+        control_mode == "HAND"
+        and bool(settings.get("enable_scheduler"))
+        and bool(settings.get("auto_execute"))
+    )
+
+
 async def _scheduler_loop(app: FastAPI) -> None:
     """
     Pozadí smyčka plánovače – každou minutu kontroluje schedule.json.
@@ -502,7 +523,7 @@ async def _scheduler_loop(app: FastAPI) -> None:
     a spustí time_on / time_off akce, jejichž čas odpovídá aktuálnímu
     HH:MM a den v týdnu je v povoleném seznamu (nebo je seznam prázdný).
 
-    Akce se provedou jen pokud je v settings.json zapnuto
+    Akce se provedou jen v režimu HAND a pokud je v settings.json zapnuto
     ``enable_scheduler`` i ``auto_execute``. Každá akce se v danou minutu
     provede nejvýše jednou (deduplication přes ``_executed`` set).
 
@@ -530,7 +551,8 @@ async def _scheduler_loop(app: FastAPI) -> None:
             sched_data = json.loads(schedule_path.read_text(encoding="utf-8"))
             settings = sched_data.get("settings", {})
 
-            if not settings.get("enable_scheduler") or not settings.get("auto_execute"):
+            control_mode = getattr(app.state, "control_mode", "AUTO")
+            if not _scheduler_enabled(control_mode, settings):
                 continue
 
             api: ThinQAPI | None = getattr(app.state, "api", None)
