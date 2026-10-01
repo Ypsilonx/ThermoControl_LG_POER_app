@@ -50,3 +50,6 @@ data/openapi.json
 data/state.json
 data/weather_cache.json
 data/history.db*
+
+# Výstupy nástroje Playwright (screenshoty z testování UI)
+.playwright-mcp/

@@ -8,15 +8,23 @@ Endpointy:
     PUT    /api/control/config            – změna části konfigurace
     DELETE /api/control/override/{zona}   – zrušení přebití
     GET    /api/control/journal           – deník rozhodnutí (nejnovější první)
+    GET    /api/control/zones             – nastavení zón pro editor + nalezená zařízení
+    GET    /api/control/zones/proposal    – návrh zón z nalezených zařízení
+    PUT    /api/control/zones             – uložení nastavení zón
 """
 
 import logging
+import os
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
+from poer_api import PoerApiError, fetch_poer_devices
+from server_api import list_ac_device_ids, list_devices
 from web.routes.ws import manager as ws_manager
+from zones.config import read_zones_raw
+from zones.discovery import device_sensors, propose_zones
 from zones.loop import ZoneController
 
 logger = logging.getLogger(__name__)
@@ -148,3 +156,85 @@ async def get_journal(request: Request, limit: int = Query(50, ge=1, le=200)) ->
     """Vrátí posledních ``limit`` záznamů deníku, nejnovější první."""
     journal = list(_zones(request).journal)
     return journal[::-1][:limit]
+
+
+def _lg_devices() -> list[dict]:
+    """Klimatizace z ``devices.json`` jako ``[{"device_id", "name"}]``."""
+    try:
+        ac_ids = set(list_ac_device_ids())
+        return [{"device_id": d["device_id"], "name": d.get("alias") or d["device_id"]}
+                for d in list_devices() if d["device_id"] in ac_ids]
+    except Exception as exc:
+        logger.warning("⚠️ Seznam klimatizací nelze načíst: %s", exc)
+        return []
+
+
+async def _discover() -> tuple[list[dict], list[dict], str | None]:
+    """
+    Najde zařízení pro editor zón.
+
+    Returns:
+        tuple: (POER termostaty, klimatizace, varování nebo None)
+    """
+    warning = None
+    poer: list[dict] = []
+    api_key = os.getenv("LG_POER_API_KEY", "").strip()
+    if api_key:
+        try:
+            poer = [{"device_id": d["device_id"], "name": d["name"]}
+                    for d in await fetch_poer_devices(api_key)]
+        except PoerApiError as exc:
+            warning = f"POER termostaty nelze načíst: {exc}"
+    return poer, _lg_devices(), warning
+
+
+@router.get("/zones", summary="Nastavení zón pro editor")
+async def get_zones_setup(request: Request) -> dict:
+    """
+    Vrátí uložené nastavení zón (nebo None), nalezená zařízení a čidla, která nabízejí.
+
+    Returns:
+        dict: ``{"configured", "config", "devices": {"poer", "lg"}, "available_sensors",
+              "warning"}``
+    """
+    zones = _zones(request)
+    poer, lg, warning = await _discover()
+    return {
+        "configured": zones.zones is not None,
+        "config": read_zones_raw(zones.zones_path) if zones.zones is not None else None,
+        "devices": {"poer": poer, "lg": lg},
+        "available_sensors": device_sensors(poer, lg),
+        "warning": warning,
+    }
+
+
+@router.get("/zones/proposal", summary="Návrh zón z nalezených zařízení")
+async def get_zones_proposal(request: Request) -> dict:
+    """
+    Navrhne zóny: jedna na každý POER termostat, klimatizace do první zóny.
+
+    Raises:
+        HTTPException 404: Nebylo nalezeno žádné zařízení
+    """
+    poer, lg, warning = await _discover()
+    try:
+        return propose_zones(poer, lg)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=warning or str(exc))
+
+
+@router.put("/zones", summary="Uložit nastavení zón")
+async def save_zones_setup(body: dict, request: Request) -> dict:
+    """
+    Zvaliduje a uloží nastavení zón; řízení ho začne hned používat.
+
+    Raises:
+        HTTPException 422: Neplatné nastavení (nic se neuloží)
+    """
+    zones = _zones(request)
+    try:
+        zones.save_zones(body)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    logger.info("🏠 Nastavení zón uloženo: %s", ", ".join(zones.zone_ids))
+    return {"configured": True, "zones": zones.zone_ids}

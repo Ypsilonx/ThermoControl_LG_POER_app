@@ -65,7 +65,7 @@ src/
         ├── devices.py          # GET /api/devices/, /api/devices/{id}/status
         ├── control.py          # POST /api/devices/{id}/command
         ├── mode.py             # GET/POST /api/mode/  (legacy AUTO/HAND mapping onto zone modes)
-        ├── zones.py            # /api/control/* — zone mode, program, automation, vacation, overrides, journal
+        ├── zones.py            # /api/control/* — mode, program, automation, vacation, overrides, journal, zone editor
         ├── schedule.py         # CRUD /api/schedule/entries (HAND scheduler)
         ├── energy.py           # GET /api/energy/{id} (view+offset), /{id}/export (CSV)
         ├── weather.py          # GET /api/weather/forecast, /config
@@ -100,7 +100,9 @@ Middleware order matters: `CloudflareAccessMiddleware` must be the outermost wra
 
 ### Zone control and modes
 
-Modes (`data/control.json`, `/api/control/mode`): `manual` (Ručně), `program` (weekly blocks),
+Zones are configured in the app (`/control` → 🏠 Dům, `GET/PUT /api/control/zones`, proposal from
+discovered POER/LG devices in `zones/discovery.py`); `setup.py` does not copy the zones template.
+User docs: `docs/nastaveni-zon.md`. Modes (`data/control.json`, `/api/control/mode`): `manual` (Ručně), `program` (weekly blocks),
 `automation` (zone targets + optional night setback), `vacation` (away temps, preheat before return,
 then back to the previous mode). `data/zones.json` (template `zones.json.example`, not committed) defines
 zones, heaters (`poer:<id>` with `offset_c`, `lg:*`) and the sensor registry with ordered role sources.

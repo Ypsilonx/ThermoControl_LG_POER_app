@@ -12,7 +12,7 @@ Webová a desktopová aplikace pro ovládání LG klimatizace a POER termostatu.
 - **Webové rozhraní** – single-page dashboard (Tailwind CSS + Alpine.js), tmavý motiv, bez instalace klienta
 - **Real-time push** – MQTT → WebSocket; stavové změny se promítají automaticky (indikátor "Push"/"Offline")
 - **Ovládání klimatizace a POER termostatu** – LG má v dashboardu power, režimy (COOL/HEAT/FAN/AUTO/AIR_DRY), teplotu se sliderem + debounce (°C krok), větrání; ovládání polohy lamel není podporováno ThinQ Connect API. POER má ovládací panel ve web dashboardu i na stránce automatizace (cílová teplota, režim `AUTO`/`HEAT`/`OFF`, předvolba `HOME`/`AWAY`). Web dashboard má přepínací taby `LG klimatizace` / `POER termostat` pro ovládání (u POER přepínač mezi termostaty) a horní POER stavový indikátor.
-- **Režimy řízení zón** – Ručně / Program (týdenní bloky) / Automatika (cíle zón + noční útlum) / Dovolená (předtopení před návratem); dočasné přebití po ruční změně teploty; zkušební provoz (jen deník rozhodnutí); stránka `/control` a karty zón na dashboardu. Struktura domu v `data/zones.json` (šablona `zones.json.example`).
+- **Režimy řízení zón** – Ručně / Program (týdenní bloky) / Automatika (cíle zón + noční útlum) / Dovolená (předtopení před návratem); dočasné přebití po ruční změně teploty; zkušební provoz (jen deník rozhodnutí); stránka `/control` a karty zón na dashboardu. Zóny se nastavují v aplikaci (návrh z nalezených zařízení), viz [Nastavení zón](docs/nastaveni-zon.md).
 - **HAND scheduler** – CRUD plánů: čas od/do, dny v týdnu, akce (mód/teplota/ventilátor), enable/disable
 - **ČHMÚ forecast** – meteogram POI 510 (model ALADIN, asimiluje radar), horizont **72 h**, fallback na region RPZL; sjednocený **tmavý widget** na dashboardu i stránce automatizace: **vlevo aktuální počasí (vždy viditelné)** – velká ikona, teplota, slovní popis a detaily (vlhkost, oblačnost, srážky, vítr + směr `wind_dir_deg`, nárazy, tlak); **vpravo přepínací záložky Dny / Hodiny** – denní min/max teplota + srážky/oblačnost, hodinová předpověď s posuvníkem a horizontálním stripem podrobných kartiček; data jsou **automaticky obnovována** background taskem `_weather_refresh_loop` v intervalu `refresh_interval_hours` (výchozí **3 h**) – nezávisle na aktivním režimu (AUTO/HAND); první fetch proběhne okamžitě při startu serveru
 - **Perzistence počasí** – poslední úspěšně stažená předpověď se ukládá do `data/weather_cache.json` (atomický zápis, přepisuje se při každé aktualizaci); při startu serveru se načte z disku, takže počasí je vidět **okamžitě po restartu** bez čekání na první fetch (základ pro budoucí plánovací automatiku)
@@ -55,7 +55,7 @@ data/                      # Docker volume (necommitovat config.json, devices.js
 ├── device_profile.json    # Profil zařízení
 ├── schedule.json          # Časové plány HAND scheduleru
 ├── automation_rules.json  # Sezónní pravidla + weather (POI, indoor proxy, outdoor zdroj, interval, horizont)
-├── zones.json             # Zóny, topidla, čidla a role (z šablony zones.json.example, necommitovat)
+├── zones.json             # Zóny, topidla, čidla a role – vytváří editor v aplikaci (formát: zones.json.example)
 ├── control.json           # Režim, program, automatika, dovolená, přebití (spravuje aplikace)
 └── weather_cache.json     # Poslední stažená předpověď ČHMÚ (autogenerovaná, necommitovat)
 
@@ -161,6 +161,13 @@ Web API endpointy pro POER:
 
 > ⚠️ Nikdy necommitujte `config.json` ani `devices.json`!
 
+### Zóny a režimy – první nastavení
+
+Po prvním spuštění otevřete **Řízení → 🏠 Dům** (`/control`) a klikněte na
+**Navrhnout z nalezených zařízení**. Aplikace navrhne zóny podle POER termostatů a klimatizací,
+návrh upravíte a uložíte. Vaše nastavení zůstává jen v `data/` (necommituje se); repozitář
+obsahuje jen obecnou šablonu `data/zones.json.example`. Podrobně: [docs/nastaveni-zon.md](docs/nastaveni-zon.md).
+
 ### Spuštění
 
 ```powershell
@@ -221,7 +228,9 @@ docker-compose logs -f lg-klimatizace
 | `src/`, `Dockerfile` | `data/devices.json` |
 | `docker-compose.yml` | `data/schedule.json` |
 | `pyproject.toml`, `uv.lock` | `data/weather_cache.json` |
-| | `.venv/` |
+| | `data/zones.json`, `data/control.json` (vaše zóny a program) |
+| | `data/automation_rules.json`, `data/state.json`, `data/history.db` |
+| | `.env`, `.venv/` |
 
 - Token Cloudflare Tunnel ukládejte jako systémovou proměnnou (`CLOUDFLARE_TUNNEL_TOKEN`), nikdy do souborů.
 - Rotujte API klíče pravidelně.
@@ -238,6 +247,7 @@ docker-compose logs -f lg-klimatizace
 
 ## Dokumentace
 
+- Nastavení zón a režimů řízení: `docs/nastaveni-zon.md`
 - Pořadí příkazů, preconditions, retry policy: `docs/command-order-playbook.md`
 - Implementované fáze (automatika, weather, scheduler, web): `docs/scheduler-weather-roadmap.md`
 - Přispívání: `CONTRIBUTING.md`

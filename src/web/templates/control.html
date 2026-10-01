@@ -23,7 +23,7 @@
     </div>
 
     <div x-show="!zonesConfigured" class="mb-4 text-sm text-amber-300 bg-amber-500/10 border border-amber-600/40 rounded-lg px-4 py-3">
-        Zóny nejsou nastavené – vytvořte <code>data/zones.json</code> podle šablony <code>zones.json.example</code>.
+        Zóny zatím nejsou nastavené – v záložce <b>🏠 Dům</b> je navrhněte z nalezených zařízení a uložte.
     </div>
 
     <!-- Záložky -->
@@ -33,6 +33,103 @@
                     :class="tab === t.id ? 'text-white border-b-2 border-blue-500' : 'text-gray-400 hover:text-gray-200'"
                     class="px-4 py-2.5 text-sm font-semibold" x-text="t.label"></button>
         </template>
+    </div>
+
+    <!-- ── DŮM (editor zón) ── -->
+    <div x-show="tab === 'house'" class="space-y-4">
+        <div x-show="house.warning" class="text-sm text-amber-300 bg-amber-500/10 border border-amber-600/40 rounded-lg px-4 py-2"
+             x-text="house.warning"></div>
+        <div class="bg-gray-800 border border-gray-700 rounded-xl p-4 text-sm text-gray-300">
+            <p>Zóna = místnost nebo část domu s vlastní cílovou teplotou. Každá zóna má <b>topidla</b>
+               (termostaty POER, klimatizace) a <b>čidla</b> pro jednotlivé role – použije se první
+               čidlo v pořadí, které má čerstvou hodnotu.</p>
+            <div class="mt-3 flex flex-wrap gap-3">
+                <button @click="loadProposal()"
+                        class="px-4 py-2 rounded-lg bg-blue-700 hover:bg-blue-600 text-white font-semibold">
+                    🔍 Navrhnout z nalezených zařízení</button>
+                <span class="text-xs text-gray-500 self-center"
+                      x-text="'Nalezeno: ' + house.devices.poer.length + '× POER termostat, ' + house.devices.lg.length + '× klimatizace'"></span>
+            </div>
+        </div>
+
+        <template x-for="(z, zi) in house.zones" :key="zi">
+            <div class="bg-gray-800 border border-gray-700 rounded-xl p-4 space-y-3">
+                <div class="flex flex-wrap items-center gap-3">
+                    <input type="text" x-model="z.name" @input="if (z.isNew) z.id = uniqueZoneId(slugify(z.name), zi)"
+                           class="bg-gray-900 border border-gray-600 rounded px-2 py-1 text-gray-100 font-semibold">
+                    <span class="text-xs text-gray-500" x-text="'ID: ' + z.id"></span>
+                    <button @click="house.zones.splice(zi, 1)" class="ml-auto text-xs text-red-400 hover:text-red-300">Odebrat zónu</button>
+                </div>
+
+                <div>
+                    <div class="text-xs text-gray-400 mb-1">Topidla</div>
+                    <template x-for="(h, hi) in z.heaters" :key="hi">
+                        <div class="flex flex-wrap items-center gap-2 mb-1">
+                            <select x-model="h.device" class="bg-gray-900 border border-gray-600 rounded px-2 py-1 text-gray-100 text-sm">
+                                <template x-for="o in heaterOptions()" :key="o.value">
+                                    <option :value="o.value" x-text="o.label" :selected="o.value === h.device"></option>
+                                </template>
+                            </select>
+                            <label class="text-xs text-gray-400" x-show="h.device.startsWith('poer:')"
+                                   title="Posun setpointu proti cíli zóny, např. podlahová fólie −1 °C">posun
+                                <input type="number" step="0.5" min="-5" max="5" x-model.number="h.offset_c"
+                                       class="ml-1 w-16 bg-gray-900 border border-gray-600 rounded px-2 py-1 text-gray-100"> °C</label>
+                            <button @click="z.heaters.splice(hi, 1)" class="text-xs text-red-400 hover:text-red-300">✕</button>
+                        </div>
+                    </template>
+                    <button @click="z.heaters.push({ device: heaterOptions()[0]?.value || '', offset_c: 0 })"
+                            class="text-xs text-blue-400 hover:text-blue-300">+ topidlo</button>
+                </div>
+
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    <template x-for="role in roles" :key="role.id">
+                        <div class="bg-gray-900/60 rounded-lg p-2">
+                            <div class="text-xs text-gray-400 mb-1" x-text="role.label"></div>
+                            <div class="flex flex-wrap gap-1 mb-1">
+                                <template x-for="(sid, si) in (z.roles[role.id] || [])" :key="sid">
+                                    <span class="text-xs bg-gray-700 text-gray-100 rounded px-2 py-0.5 flex items-center gap-1">
+                                        <span x-text="(si + 1) + '. ' + sensorLabel(sid)"></span>
+                                        <button x-show="si > 0" @click="moveUp(z.roles[role.id], si)" title="Výš v pořadí">↑</button>
+                                        <button @click="z.roles[role.id].splice(si, 1)" class="text-red-300">✕</button>
+                                    </span>
+                                </template>
+                            </div>
+                            <select @change="if ($event.target.value) { (z.roles[role.id] ||= []).push($event.target.value); $event.target.value = '' }"
+                                    class="bg-gray-900 border border-gray-600 rounded px-2 py-0.5 text-gray-300 text-xs">
+                                <option value="">+ přidat čidlo</option>
+                                <template x-for="s in house.sensors.filter(s => role.sources.includes(s.source) && !(z.roles[role.id] || []).includes(s.id))" :key="s.id">
+                                    <option :value="s.id" x-text="sensorLabel(s.id)"></option>
+                                </template>
+                            </select>
+                        </div>
+                    </template>
+                </div>
+            </div>
+        </template>
+        <button @click="addZone()" class="text-sm text-blue-400 hover:text-blue-300">+ Přidat zónu</button>
+
+        <div class="bg-gray-800 border border-gray-700 rounded-xl p-4 space-y-2">
+            <div class="font-semibold text-gray-100">Čidla</div>
+            <template x-for="(s, si) in house.sensors" :key="s.id">
+                <div class="flex flex-wrap items-center gap-3 text-sm text-gray-300">
+                    <span class="font-mono text-xs text-gray-400 w-40" x-text="s.id"></span>
+                    <span x-text="sensorLabel(s.id)"></span>
+                    <input x-show="s.source === 'http'" type="url" x-model="s.url" placeholder="https://…"
+                           class="bg-gray-900 border border-gray-600 rounded px-2 py-1 text-gray-100 text-xs w-72">
+                    <button x-show="!sensorUsed(s.id) && (s.source === 'http' || s.source === 'smart_plug')"
+                            @click="house.sensors.splice(si, 1)" class="text-xs text-red-400 hover:text-red-300">Odebrat</button>
+                </div>
+            </template>
+            <div class="flex flex-wrap items-center gap-2 pt-2 border-t border-gray-700 text-xs">
+                <input type="text" x-model="newSensorName" placeholder="Název, např. Čidlo východ"
+                       class="bg-gray-900 border border-gray-600 rounded px-2 py-1 text-gray-100">
+                <button @click="addSensor('http')" class="px-2.5 py-1 rounded bg-gray-700 hover:bg-gray-600 text-gray-100">+ HTTP čidlo (JSON s temperature_c)</button>
+                <button @click="addSensor('smart_plug')" class="px-2.5 py-1 rounded bg-gray-700 hover:bg-gray-600 text-gray-100">+ Zásuvka čerpadla krbu</button>
+            </div>
+        </div>
+
+        <button @click="saveHouse()"
+                class="px-5 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white font-semibold">Uložit zóny</button>
     </div>
 
     <!-- ── PROGRAM ── -->
@@ -219,6 +316,7 @@ document.addEventListener('alpine:init', () => {
     Alpine.data('controlPage', () => ({
         tab: 'program',
         tabs: [
+            { id: 'house',      label: '🏠 Dům' },
             { id: 'program',    label: '📅 Program' },
             { id: 'automation', label: '🤖 Automatika' },
             { id: 'vacation',   label: '🏖️ Dovolená' },
@@ -240,11 +338,141 @@ document.addEventListener('alpine:init', () => {
         vacationReturn: '',
         copyTargets: [],
         journal: [],
+        // Editor zón (záložka Dům) – zóny a čidla jako pole kvůli úpravám v UI
+        house: { zones: [], sensors: [], devices: { poer: [], lg: [] }, warning: null },
+        newSensorName: '',
+        roles: [
+            { id: 'indoor_temperature',  label: 'Vnitřní teplota',  sources: ['poer', 'lg', 'http'] },
+            { id: 'indoor_humidity',     label: 'Vnitřní vlhkost',  sources: ['poer', 'http'] },
+            { id: 'outdoor_temperature', label: 'Venkovní teplota', sources: ['chmi', 'http'] },
+            { id: 'fireplace',           label: 'Krb topí (zásuvka čerpadla)', sources: ['smart_plug'] },
+        ],
         toast: '',
         toastError: false,
 
         async init() {
             await this.load();
+            await this.loadHouse();
+            if (!this.zonesConfigured || location.hash === '#house') this.tab = 'house';
+        },
+
+        // ── Editor zón ────────────────────────────────────────────
+        slugify(text) {
+            const s = text.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
+                .replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+            return s || 'zona';
+        },
+
+        uniqueZoneId(slug, index) {
+            const taken = this.house.zones.filter((_, i) => i !== index).map(z => z.id);
+            let id = slug, n = 2;
+            while (taken.includes(id)) id = `${slug}_${n++}`;
+            return id;
+        },
+
+        _fromRaw(raw) {
+            const roleIds = this.roles.map(r => r.id);
+            this.house.zones = Object.entries(raw.zones || {}).map(([id, z]) => ({
+                id, name: z.name || id, isNew: false,
+                heaters: (z.heaters || []).map(h => ({ device: h.device, offset_c: h.offset_c || 0 })),
+                roles: Object.fromEntries(roleIds.map(r => [r, [...((z.roles || {})[r] || [])]])),
+            }));
+            this.house.sensors = Object.entries(raw.sensors || {}).map(([id, s]) => ({ id, ...s }));
+        },
+
+        _toRaw() {
+            const zones = {};
+            for (const z of this.house.zones) {
+                const roles = Object.fromEntries(Object.entries(z.roles).filter(([, ids]) => ids.length));
+                zones[z.id] = { name: z.name, heaters: z.heaters, roles };
+            }
+            const sensors = {};
+            for (const { id, ...s } of this.house.sensors) sensors[id] = s;
+            return { zones, sensors };
+        },
+
+        async loadHouse() {
+            const r = await fetch('/api/control/zones');
+            if (!r.ok) return;
+            const d = await r.json();
+            this.house.devices = d.devices;
+            this.house.warning = d.warning;
+            this._fromRaw(d.config || { zones: {}, sensors: {} });
+            // Čidla nalezených zařízení, která v nastavení ještě nejsou, se nabídnou k výběru.
+            for (const [id, s] of Object.entries(d.available_sensors)) {
+                const known = this.house.sensors.some(x => x.id === id
+                    || (x.source === s.source && (x.device_id || null) === (s.device_id || null)));
+                if (!known) this.house.sensors.push({ id, ...s });
+            }
+        },
+
+        async loadProposal() {
+            if (this.house.zones.length && !confirm('Přepsat rozpracované zóny návrhem z nalezených zařízení?')) return;
+            const r = await fetch('/api/control/zones/proposal');
+            const d = await r.json().catch(() => ({}));
+            if (!r.ok) return this.notify(d.detail || 'Návrh se nepodařilo vytvořit', true);
+            this._fromRaw(d);
+            this.notify('Návrh načten – zkontrolujte ho a uložte.');
+        },
+
+        heaterOptions() {
+            const options = [];
+            if (this.house.devices.lg.length) options.push({ value: 'lg:*', label: '❄️ Všechny klimatizace' });
+            for (const d of this.house.devices.lg) options.push({ value: 'lg:' + d.device_id, label: '❄️ ' + d.name });
+            for (const d of this.house.devices.poer) options.push({ value: 'poer:' + d.device_id, label: '🌡️ ' + d.name });
+            // Uložené topidlo, které teď nebylo nalezeno (offline), musí zůstat ve výběru.
+            for (const z of this.house.zones) for (const h of z.heaters) {
+                if (h.device && !options.some(o => o.value === h.device)) options.push({ value: h.device, label: h.device });
+            }
+            return options;
+        },
+
+        sensorLabel(id) {
+            const s = this.house.sensors.find(x => x.id === id);
+            if (!s) return id;
+            if (s.name) return s.name;
+            if (s.source === 'poer') {
+                const d = this.house.devices.poer.find(x => x.device_id === s.device_id);
+                return '🌡️ POER ' + (d ? d.name : s.device_id);
+            }
+            return { lg: '❄️ Klimatizace (čidlo AC)', chmi: '☁️ ČHMÚ', http: '🌐 ' + id,
+                     smart_plug: '🔌 ' + id }[s.source] || id;
+        },
+
+        sensorUsed(id) {
+            return this.house.zones.some(z => Object.values(z.roles).some(ids => ids.includes(id)));
+        },
+
+        moveUp(list, index) {
+            [list[index - 1], list[index]] = [list[index], list[index - 1]];
+        },
+
+        addZone() {
+            const name = 'Nová zóna';
+            this.house.zones.push({ id: this.uniqueZoneId(this.slugify(name), -1), name, isNew: true,
+                                    heaters: [], roles: Object.fromEntries(this.roles.map(r => [r.id, []])) });
+        },
+
+        addSensor(source) {
+            const name = this.newSensorName.trim();
+            if (!name) return this.notify('Zadejte název čidla', true);
+            let id = this.slugify(name), n = 2;
+            while (this.house.sensors.some(s => s.id === id)) id = `${this.slugify(name)}_${n++}`;
+            this.house.sensors.push(source === 'http' ? { id, source, name, url: '' } : { id, source, name });
+            this.newSensorName = '';
+        },
+
+        async saveHouse() {
+            const r = await fetch('/api/control/zones', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(this._toRaw()),
+            });
+            const d = await r.json().catch(() => ({}));
+            if (!r.ok) return this.notify(d.detail || 'Uložení zón selhalo', true);
+            this.notify('Zóny uloženy.');
+            await this.load();
+            await this.loadHouse();
         },
 
         async load() {

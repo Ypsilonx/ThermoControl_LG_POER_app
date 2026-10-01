@@ -17,7 +17,14 @@ from typing import Any, Callable
 from command_arbiter import CommandRequest, CommandSource, CommandSuperseded
 from device_jobs import poer_command_job, poer_device_key
 from poer_api import PoerApiError, fetch_poer_statuses_cached
-from zones.config import ZonesConfig, load_control, load_zones, normalize_control, save_control
+from zones.config import (
+    ZonesConfig,
+    load_control,
+    load_zones,
+    normalize_control,
+    save_control,
+    save_zones,
+)
 from zones.decide import ZoneDecision, decide_zone, override_until
 from zones.sensors import (
     SensorValues,
@@ -109,6 +116,11 @@ class ZoneController:
         return list(self.zones.zones) if self.zones else []
 
     @property
+    def zones_path(self) -> Path:
+        """Cesta k ``zones.json``."""
+        return self._zones_path
+
+    @property
     def legacy_mode(self) -> str:
         """
         Dřívější přepínač HAND/AUTO odvozený z režimu: Ručně → HAND, ostatní → AUTO.
@@ -127,6 +139,31 @@ class ZoneController:
         if self.zones is None:
             logger.info("ℹ️ Zóny: %s chybí – zónové řízení neběží", self._zones_path.name)
         self.control = load_control(self._control_path, self._state_path, self.zone_ids)
+
+    def save_zones(self, raw: dict) -> None:
+        """
+        Uloží nové nastavení zón z editoru a hned ho začne používat (bez restartu).
+
+        Cíle v programu, automatice a dovolené se doplní pro nové zóny (výchozí
+        hodnoty) a odeberou u smazaných.
+
+        Args:
+            raw: Obsah ``zones.json``
+
+        Raises:
+            ValueError: Neplatná konfigurace (nic se neuloží)
+        """
+        self.zones = save_zones(self._zones_path, raw)
+        self.control = normalize_control(self.control, self.zone_ids)
+        self._save()
+        for zone_id in list(self.zone_states):
+            if zone_id not in self.zones.zones:
+                del self.zone_states[zone_id]
+        self._decisions.clear()
+        self._last_journal_key.clear()
+        self._sent.clear()
+        self._journal_event(self._local_now(), "Nastavení zón změněno")
+        self.request_tick()
 
     def _save(self) -> None:
         """Uloží ``control.json``."""

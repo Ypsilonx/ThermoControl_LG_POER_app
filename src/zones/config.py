@@ -34,6 +34,8 @@ DEFAULT_SETBACK_C = 19.0
 DEFAULT_AWAY_C = 15.0
 
 _TIME_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+# ID zóny a čidla: klíč v control.json a v URL (/api/control/override/<id>).
+_ID_RE = re.compile(r"^[a-z0-9_]{1,40}$")
 
 
 @dataclass(frozen=True)
@@ -106,8 +108,15 @@ def _parse_heater(zone_id: str, raw: dict) -> Heater:
     return Heater(kind, None if device_id == "*" else device_id, float(raw.get("offset_c", 0.0)))
 
 
+def _check_id(kind: str, value: str) -> None:
+    """Ověří ID zóny/čidla (malá písmena bez diakritiky, číslice, ``_``)."""
+    if not _ID_RE.match(value):
+        raise ValueError(f"{kind} '{value}': ID smí obsahovat jen malá písmena a-z, číslice a _.")
+
+
 def _parse_sensor(sensor_id: str, raw: dict) -> Sensor:
     """Převede záznam čidla ze ``zones.json`` na ``Sensor``."""
+    _check_id("Čidlo", sensor_id)
     source = raw.get("source")
     if source not in SENSOR_SOURCES:
         raise ValueError(f"Čidlo {sensor_id}: neznámý zdroj '{source}'.")
@@ -139,6 +148,7 @@ def parse_zones(raw: dict[str, Any]) -> ZonesConfig:
     sensors = {sid: _parse_sensor(sid, s) for sid, s in (raw.get("sensors") or {}).items()}
     zones: dict[str, Zone] = {}
     for zone_id, z in (raw.get("zones") or {}).items():
+        _check_id("Zóna", zone_id)
         heaters = tuple(_parse_heater(zone_id, h) for h in z.get("heaters") or [])
         if not heaters:
             raise ValueError(f"Zóna {zone_id} nemá žádné topidlo.")
@@ -174,6 +184,40 @@ def load_zones(path: Path) -> ZonesConfig | None:
     except json.JSONDecodeError as exc:
         raise ValueError(f"{path.name}: neplatný JSON ({exc})") from exc
     return parse_zones(raw)
+
+
+def read_zones_raw(path: Path) -> dict | None:
+    """
+    Načte ``zones.json`` bez validace (pro editor v aplikaci).
+
+    Returns:
+        dict | None: Obsah souboru, nebo None když chybí či není čitelný JSON
+    """
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def save_zones(path: Path, raw: dict[str, Any]) -> ZonesConfig:
+    """
+    Zvaliduje a atomicky uloží ``zones.json``; neplatná konfigurace se neuloží.
+
+    Args:
+        path: Cesta k ``zones.json``
+        raw:  Nový obsah
+
+    Returns:
+        ZonesConfig: Uložená konfigurace
+
+    Raises:
+        ValueError: Neplatná konfigurace
+    """
+    config = parse_zones(raw)
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(path)
+    return config
 
 
 def _block(start: str, zone_ids: list[str], temperature: float) -> dict:
