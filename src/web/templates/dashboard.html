@@ -28,11 +28,11 @@
                   :class="isPowerOn ? 'text-green-400' : 'text-red-400'"
                   x-text="isPowerOn ? 'Zapnuto' : 'Vypnuto'">
             </span>
-            <span :class="controlMode==='AUTO'
-                        ? 'bg-emerald-500/15 text-emerald-400 ring-1 ring-emerald-500/40'
-                        : 'bg-amber-500/15 text-amber-400 ring-1 ring-amber-500/40'"
+            <span :class="zoneMode === 'manual'
+                        ? 'bg-amber-500/15 text-amber-400 ring-1 ring-amber-500/40'
+                        : 'bg-emerald-500/15 text-emerald-400 ring-1 ring-emerald-500/40'"
                   class="text-xs px-2.5 py-1 rounded-full font-semibold flex-shrink-0"
-                  x-text="controlMode === 'AUTO' ? '🤖 AUTO' : '🖐️ HAND'">
+                  x-text="zoneModeLabel(zoneMode)">
             </span>
             <!-- WS indikátor -->
             <span class="flex items-center gap-1.5 text-xs flex-shrink-0"
@@ -580,8 +580,8 @@
                 </div>
                 <div class="flex justify-between border-t border-gray-700 pt-2 mt-1">
                     <span class="text-gray-400">Řízení</span>
-                    <span :class="controlMode==='AUTO' ? 'text-emerald-400' : 'text-amber-400'"
-                          class="font-semibold" x-text="controlMode"></span>
+                    <span :class="zoneMode === 'manual' ? 'text-amber-400' : 'text-emerald-400'"
+                          class="font-semibold" x-text="zoneModeLabel(zoneMode)"></span>
                 </div>
                 <div class="flex justify-between" x-show="lastUpdate">
                     <span class="text-gray-500 text-xs">Aktualizováno</span>
@@ -629,21 +629,69 @@
     </div>
 
     <!-- ═══════════════════════════════════════════════════════
-         VELKÉ AUTO/HAND PŘEPÍNACÍ TLAČÍTKO
+         REŽIM ŘÍZENÍ A ZÓNY
     ════════════════════════════════════════════════════════ -->
-    <div class="flex justify-center mb-6">
-        <button @click="toggleMode()"
-                :class="controlMode === 'AUTO'
-                    ? 'bg-emerald-700 hover:bg-emerald-600 ring-2 ring-emerald-600/30'
-                    : 'bg-amber-700 hover:bg-amber-600 ring-2 ring-amber-600/30'"
-                class="flex items-center gap-3 px-12 py-4 rounded-full text-white font-bold
-                       text-lg shadow-xl transition-all active:scale-95">
-            <span class="text-2xl" x-text="controlMode === 'AUTO' ? '🤖' : '🖐️'"></span>
-            <span x-text="controlMode === 'AUTO'
-                ? 'Přepnout na HAND mód'
-                : 'Přepnout na AUTO mód'">
+    <div class="mb-6">
+        <div class="flex flex-wrap items-center justify-center gap-2 mb-3">
+            <template x-for="m in modeOptions" :key="m.id">
+                <button @click="setZoneMode(m.id)"
+                        :class="zoneMode === m.id
+                            ? 'bg-emerald-700 text-white ring-2 ring-emerald-500/40'
+                            : 'bg-gray-800 text-gray-300 hover:bg-gray-700 border border-gray-700'"
+                        class="px-5 py-2.5 rounded-full text-sm font-semibold transition-all active:scale-95">
+                    <span x-text="m.icon + ' ' + m.label"></span>
+                </button>
+            </template>
+        </div>
+        <div class="flex flex-wrap items-center justify-center gap-3 text-xs mb-4">
+            <span x-show="zoneDryRun"
+                  class="px-2.5 py-1 rounded-full bg-sky-500/15 text-sky-300 ring-1 ring-sky-500/40"
+                  title="Řízení zón jen počítá a zapisuje deník, žádné příkazy neposílá">
+                🧪 Zkušební provoz – nic se neposílá
             </span>
-        </button>
+            <a href="/control" class="text-blue-400 hover:text-blue-300">Program, automatika, dovolená →</a>
+        </div>
+
+        <div x-show="!zonesConfigured" class="text-center text-xs text-gray-500">
+            Zóny nejsou nastavené (chybí <code>data/zones.json</code>, šablona <code>zones.json.example</code>).
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4" x-show="zonesConfigured">
+            <template x-for="z in zones" :key="z.id">
+                <div class="bg-gray-800 border rounded-xl p-4"
+                     :class="z.emergency ? 'border-red-600' : (z.paused || z.hold ? 'border-amber-600' : 'border-gray-700')">
+                    <div class="flex items-center justify-between mb-2">
+                        <span class="font-semibold text-gray-100" x-text="z.name"></span>
+                        <span class="text-xs text-gray-500" x-show="z.indoor_sensor"
+                              x-text="'čidlo: ' + z.indoor_sensor"></span>
+                    </div>
+                    <div class="flex items-baseline gap-4 mb-2">
+                        <div>
+                            <div class="text-3xl font-bold text-gray-100 tabular-nums"
+                                 x-text="z.indoor_c != null ? z.indoor_c.toFixed(1) + '°C' : '—'"></div>
+                            <div class="text-xs text-gray-500"
+                                 x-text="z.humidity_pct != null ? 'vlhkost ' + Math.round(z.humidity_pct) + ' %' : 'aktuálně'"></div>
+                        </div>
+                        <div>
+                            <div class="text-xl font-semibold text-emerald-400 tabular-nums"
+                                 x-text="z.target_c != null ? '→ ' + z.target_c.toFixed(1) + '°C' : '→ —'"></div>
+                            <div class="text-xs text-gray-500">cíl</div>
+                        </div>
+                    </div>
+                    <div class="text-sm text-gray-300" x-text="z.reason || '—'"></div>
+                    <div class="text-xs text-red-400 mt-1" x-show="z.emergency">⚠️ Pod nouzovým minimem</div>
+                    <div class="text-xs text-amber-400 mt-1" x-show="z.hold">⚠️ Chybí čerstvá vnitřní teplota – nic se nemění</div>
+                    <div class="text-xs text-gray-500 mt-1" x-show="z.setpoints && Object.keys(z.setpoints).length"
+                         x-text="'Termostat: ' + Object.values(z.setpoints || {}).map(v => v.toFixed(1) + '°C').join(', ')"></div>
+                    <div x-show="z.override" class="mt-3 flex items-center justify-between bg-amber-500/10 border border-amber-600/40 rounded-lg px-3 py-2">
+                        <span class="text-xs text-amber-300"
+                              x-text="z.override ? '✋ Přebití ' + z.override.target_c.toFixed(1) + '°C – zbývá ' + remaining(z.override.until) : ''"></span>
+                        <button @click="cancelOverride(z.id)"
+                                class="text-xs px-2.5 py-1 rounded bg-amber-700 hover:bg-amber-600 text-white">Zrušit</button>
+                    </div>
+                </div>
+            </template>
+        </div>
     </div>
 
     <!-- ═══════════════════════════════════════════════════════
@@ -1145,6 +1193,17 @@ document.addEventListener('alpine:init', () => {
 
         // ── Řízení ────────────────────────────────────────────────────
         controlMode: 'AUTO',
+        // Režim řízení zón (/api/control) – controlMode je jeho starý tvar HAND/AUTO
+        zoneMode:        'manual',
+        zoneDryRun:      true,
+        zonesConfigured: false,
+        zones:           [],
+        modeOptions: [
+            { id: 'manual',     label: 'Ručně',     icon: '🖐️' },
+            { id: 'program',    label: 'Program',   icon: '📅' },
+            { id: 'automation', label: 'Automatika', icon: '🤖' },
+            { id: 'vacation',   label: 'Dovolená',  icon: '🏖️' },
+        ],
 
         // ── Počasí ────────────────────────────────────────────────────
         showTemp:       true,
@@ -1344,7 +1403,7 @@ document.addEventListener('alpine:init', () => {
 
         // ── Lifecycle ─────────────────────────────────────────────────
         async init() {
-            await Promise.all([this.loadMode(), this.loadDevices(), this.loadProfileLimits()]);
+            await Promise.all([this.loadControl(), this.loadDevices(), this.loadProfileLimits()]);
             // Sync tab s načteným módem (při spuštění může být aktivní HAND)
             if (this.controlMode === 'HAND') {
                 this.bottomTab = 'hand';
@@ -1376,11 +1435,60 @@ document.addEventListener('alpine:init', () => {
         },
 
         // ── Načítání dat ──────────────────────────────────────────────
-        async loadMode() {
+        async loadControl() {
             try {
-                const r = await fetch('/api/mode/');
-                if (r.ok) this.controlMode = (await r.json()).mode;
+                const r = await fetch('/api/control/');
+                if (!r.ok) return;
+                const d = await r.json();
+                this._applyControl(d.mode, d.dry_run, d.zones);
+                this.zonesConfigured = d.zones_configured;
             } catch (_) {}
+        },
+
+        _applyControl(mode, dryRun, zones) {
+            this.zoneMode    = mode;
+            this.zoneDryRun  = dryRun;
+            this.controlMode = mode === 'manual' ? 'HAND' : 'AUTO';
+            if (zones) this.zones = zones;
+        },
+
+        zoneModeLabel(mode) {
+            const m = this.modeOptions.find(o => o.id === mode);
+            return m ? m.icon + ' ' + m.label : mode;
+        },
+
+        remaining(untilIso) {
+            const ms = new Date(untilIso) - new Date();
+            if (ms <= 0) return '0 min';
+            const h = Math.floor(ms / 3_600_000), m = Math.round((ms % 3_600_000) / 60_000);
+            return h ? `${h} h ${m} min` : `${m} min`;
+        },
+
+        async setZoneMode(mode) {
+            if (mode === this.zoneMode) return;
+            const r = await fetch('/api/control/mode', {
+                method:  'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body:    JSON.stringify({ mode }),
+            });
+            const d = await r.json().catch(() => ({}));
+            if (!r.ok) {
+                this.showToast(d.detail || 'Režim se nepodařilo přepnout', 'error');
+                return;
+            }
+            this._applyControl(mode, this.zoneDryRun, null);
+            // Ručně = HAND plány, ostatní režimy = AUTO panel (šetří jedno kliknutí)
+            this.bottomTab = mode === 'manual' ? 'hand' : 'auto';
+            if (mode === 'manual') this.loadScheduleOnce();
+        },
+
+        async cancelOverride(zoneId) {
+            const r = await fetch('/api/control/override/' + encodeURIComponent(zoneId), { method: 'DELETE' });
+            if (r.ok) {
+                this.zones = this.zones.map(z => z.id === zoneId ? { ...z, override: null } : z);
+            } else {
+                this.showToast('Přebití se nepodařilo zrušit', 'error');
+            }
         },
 
         async loadProfileLimits() {
@@ -1689,7 +1797,9 @@ document.addEventListener('alpine:init', () => {
                             self._clearConfirmedOverride(id);
                         }
                     } else if (msg.type === 'mode_change') {
-                        self.controlMode = msg.data.mode;
+                        self._applyControl(msg.data.mode, self.zoneDryRun, null);
+                    } else if (msg.type === 'zones_update') {
+                        self._applyControl(msg.data.mode, msg.data.dry_run, msg.data.zones);
                     }
                 } catch (_) {}
             };
@@ -1822,21 +1932,6 @@ document.addEventListener('alpine:init', () => {
                 this.sendCmd('set_rotate_updown',    [!this.rotateUpDown]);
             else
                 this.sendCmd('set_rotate_leftright', [!this.rotateLeftRight]);
-        },
-
-        async toggleMode() {
-            const newMode = this.controlMode === 'AUTO' ? 'HAND' : 'AUTO';
-            const r = await fetch('/api/mode/', {
-                method:  'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body:    JSON.stringify({ mode: newMode })
-            });
-            if (r.ok) {
-                this.controlMode = newMode;
-                // Automaticky přepnout tab dle nového módu (šetří jedno kliknutí)
-                this.bottomTab = newMode === 'HAND' ? 'hand' : 'auto';
-                if (newMode === 'HAND') this.loadScheduleOnce();
-            }
         },
 
         async toggleSchedEnabled() {

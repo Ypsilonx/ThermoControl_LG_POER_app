@@ -153,7 +153,8 @@ async def _submit_poer_command(
         requested_device_id: ID termostatu z požadavku
 
     Returns:
-        dict: ``{"success": True, "skipped": bool, "skip_reason": str | None}``
+        dict: ``{"success": True, "skipped": bool, "skip_reason": str | None}``;
+              u teploty navíc ``override_zone`` (zóna s novým přebitím nebo None)
 
     Raises:
         HTTPException 404: Neznámý termostat
@@ -176,7 +177,12 @@ async def _submit_poer_command(
         return {"success": True, "skipped": True, "skip_reason": str(exc)}
     except Exception as exc:
         raise HTTPException(status_code=503, detail=str(exc) or "POER command selhal")
-    return {"success": True, "skipped": not outcome.sent, "skip_reason": outcome.skip_reason}
+    response = {"success": True, "skipped": not outcome.sent, "skip_reason": outcome.skip_reason}
+    zones = getattr(request.app.state, "zones", None)
+    if endpoint == "set_temp" and zones is not None:
+        # Ruční teplota v režimu Program/Automatika/Dovolená = dočasné přebití zóny.
+        response["override_zone"] = zones.add_override("poer", device_id, data["temperature"])
+    return response
 
 
 @router.get("/devices", summary="Stav všech POER termostatů")

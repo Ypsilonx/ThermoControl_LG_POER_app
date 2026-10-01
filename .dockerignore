@@ -38,6 +38,8 @@ test_*.py
 data/config.json
 data/devices.json
 data/automation_rules.json
+data/zones.json
+data/control.json
 data/schedule.json
 data/history.db*
 .env

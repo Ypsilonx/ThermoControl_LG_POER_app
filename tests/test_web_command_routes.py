@@ -35,9 +35,20 @@ class FakeArbiter:
         return self.result
 
 
-def _request(arbiter: FakeArbiter):
-    """Falešný FastAPI Request s app.state.api a app.state.arbiter."""
-    state = SimpleNamespace(api=object(), api_error=None, arbiter=arbiter)
+class FakeZones:
+    """Falešné řízení zón: zaznamená založená přebití."""
+
+    def __init__(self) -> None:
+        self.overrides = []
+
+    def add_override(self, kind, device_id, target_c):
+        self.overrides.append((kind, device_id, target_c))
+        return "zona"
+
+
+def _request(arbiter: FakeArbiter, zones: FakeZones | None = None):
+    """Falešný FastAPI Request s app.state.api, app.state.arbiter a app.state.zones."""
+    state = SimpleNamespace(api=object(), api_error=None, arbiter=arbiter, zones=zones)
     return SimpleNamespace(app=SimpleNamespace(state=state))
 
 
@@ -67,6 +78,16 @@ class ControlRouteTests(unittest.IsolatedAsyncioTestCase):
         response = await control.send_command("dev1", body, _request(arbiter))
         self.assertTrue(response.skipped)
         self.assertEqual(response.skip_reason, "Nahrazen novějším příkazem.")
+
+    async def test_manual_temperature_creates_zone_override(self) -> None:
+        zones = FakeZones()
+        arbiter = FakeArbiter(result=CommandOutcome(sent=True))
+        body = control.CommandRequest(command="set_temperature", args=[23])
+        await control.send_command("dev1", body, _request(arbiter, zones))
+        self.assertEqual(zones.overrides, [("lg", "dev1", 23.0)])
+        await control.send_command("dev1", control.CommandRequest(command="power_on", args=[]),
+                                   _request(arbiter, zones))
+        self.assertEqual(len(zones.overrides), 1)
 
     async def test_shutdown_returns_503(self) -> None:
         arbiter = FakeArbiter(error=ArbiterClosed("Arbitr příkazů byl ukončen."))
@@ -135,6 +156,22 @@ class PoerRouteTests(unittest.IsolatedAsyncioTestCase):
             await poer.set_poer_temperature(body, _request(arbiter))
         self.assertEqual(ctx.exception.status_code, 503)
         self.assertIn("500", ctx.exception.detail)
+
+    async def test_manual_poer_temperature_creates_zone_override(self) -> None:
+        zones = FakeZones()
+        arbiter = FakeArbiter(result=CommandOutcome(sent=True))
+        body = poer.PoerTemperatureRequest(temperature=23.5, device_id="fee89300fac5")
+        result = await poer.set_poer_temperature(body, _request(arbiter, zones))
+        self.assertEqual(zones.overrides, [("poer", "fee89300fac5", 23.5)])
+        self.assertEqual(result["override_zone"], "zona")
+
+    async def test_failed_poer_command_creates_no_override(self) -> None:
+        zones = FakeZones()
+        arbiter = FakeArbiter(error=RuntimeError("cloud"))
+        with self.assertRaises(HTTPException):
+            await poer.set_poer_temperature(poer.PoerTemperatureRequest(temperature=23.0),
+                                            _request(arbiter, zones))
+        self.assertEqual(zones.overrides, [])
 
     async def test_command_for_selected_device(self) -> None:
         arbiter = FakeArbiter(result=CommandOutcome(sent=True))

@@ -10,6 +10,8 @@ data/config.json
 data/devices.json
 data/schedule.json
 data/automation_rules.json
+data/zones.json
+data/control.json
 # Proměnné prostředí s tajemstvími (.env.example se commitne)
 .env
 # Šablony NEJSOU ignorovány - .example soubory se commitnou

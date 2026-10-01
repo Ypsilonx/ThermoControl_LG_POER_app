@@ -12,7 +12,7 @@ Webová a desktopová aplikace pro ovládání LG klimatizace a POER termostatu.
 - **Webové rozhraní** – single-page dashboard (Tailwind CSS + Alpine.js), tmavý motiv, bez instalace klienta
 - **Real-time push** – MQTT → WebSocket; stavové změny se promítají automaticky (indikátor "Push"/"Offline")
 - **Ovládání klimatizace a POER termostatu** – LG má v dashboardu power, režimy (COOL/HEAT/FAN/AUTO/AIR_DRY), teplotu se sliderem + debounce (°C krok), větrání; ovládání polohy lamel není podporováno ThinQ Connect API. POER má ovládací panel ve web dashboardu i na stránce automatizace (cílová teplota, režim `AUTO`/`HEAT`/`OFF`, předvolba `HOME`/`AWAY`). Web dashboard má přepínací taby `LG klimatizace` / `POER termostat` pro ovládání (u POER přepínač mezi termostaty) a horní POER stavový indikátor.
-- **AUTO / HAND** – AUTO = sezónní pravidla + PID regulace; HAND = ruční ovládání + HAND scheduler
+- **Režimy řízení zón** – Ručně / Program (týdenní bloky) / Automatika (cíle zón + noční útlum) / Dovolená (předtopení před návratem); dočasné přebití po ruční změně teploty; zkušební provoz (jen deník rozhodnutí); stránka `/control` a karty zón na dashboardu. Struktura domu v `data/zones.json` (šablona `zones.json.example`).
 - **HAND scheduler** – CRUD plánů: čas od/do, dny v týdnu, akce (mód/teplota/ventilátor), enable/disable
 - **ČHMÚ forecast** – meteogram POI 510 (model ALADIN, asimiluje radar), horizont **72 h**, fallback na region RPZL; sjednocený **tmavý widget** na dashboardu i stránce automatizace: **vlevo aktuální počasí (vždy viditelné)** – velká ikona, teplota, slovní popis a detaily (vlhkost, oblačnost, srážky, vítr + směr `wind_dir_deg`, nárazy, tlak); **vpravo přepínací záložky Dny / Hodiny** – denní min/max teplota + srážky/oblačnost, hodinová předpověď s posuvníkem a horizontálním stripem podrobných kartiček; data jsou **automaticky obnovována** background taskem `_weather_refresh_loop` v intervalu `refresh_interval_hours` (výchozí **3 h**) – nezávisle na aktivním režimu (AUTO/HAND); první fetch proběhne okamžitě při startu serveru
 - **Perzistence počasí** – poslední úspěšně stažená předpověď se ukládá do `data/weather_cache.json` (atomický zápis, přepisuje se při každé aktualizaci); při startu serveru se načte z disku, takže počasí je vidět **okamžitě po restartu** bez čekání na první fetch (základ pro budoucí plánovací automatiku)
@@ -39,7 +39,8 @@ src/
     ├── routes/
     │   ├── devices.py     # GET /api/devices/, /api/devices/{id}/status
     │   ├── control.py     # POST /api/devices/{id}/command
-    │   ├── mode.py        # GET/POST /api/mode/  (AUTO ↔ HAND)
+    │   ├── mode.py        # GET/POST /api/mode/  (kompatibilita AUTO/HAND)
+    │   ├── zones.py       # /api/control/* – režim, program, dovolená, přebití, deník
     │   ├── schedule.py    # CRUD /api/schedule/entries
     │   ├── energy.py      # GET /api/energy/{id} (view+offset), /{id}/export (CSV)
     │   ├── weather.py     # GET /api/weather/forecast, /config
@@ -54,6 +55,8 @@ data/                      # Docker volume (necommitovat config.json, devices.js
 ├── device_profile.json    # Profil zařízení
 ├── schedule.json          # Časové plány HAND scheduleru
 ├── automation_rules.json  # Sezónní pravidla + weather (POI, indoor proxy, outdoor zdroj, interval, horizont)
+├── zones.json             # Zóny, topidla, čidla a role (z šablony zones.json.example, necommitovat)
+├── control.json           # Režim, program, automatika, dovolená, přebití (spravuje aplikace)
 └── weather_cache.json     # Poslední stažená předpověď ČHMÚ (autogenerovaná, necommitovat)
 
 Dockerfile                 # python:3.12-slim, non-root uid 1000

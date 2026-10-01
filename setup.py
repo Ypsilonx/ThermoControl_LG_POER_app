@@ -15,6 +15,7 @@ def setup_project():
         ("devices.json.example", "devices.json"),
         ("schedule.json.example", "schedule.json"),
         ("automation_rules.json.example", "automation_rules.json"),
+        ("zones.json.example", "zones.json"),
     ]
     
     print("🚀 Inicializace ThermoControl-LG-POER_app projektu...\n")

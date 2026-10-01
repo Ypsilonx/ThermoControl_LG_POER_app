@@ -1,0 +1,329 @@
+{% extends "base.html" %}
+{% block title %}Řízení zón – ThermoControl{% endblock %}
+
+{% block content %}
+<div x-data="controlPage" x-init="init()">
+
+    <!-- Toast -->
+    <div x-show="toast" x-transition
+         class="fixed top-16 right-4 z-50 max-w-sm px-4 py-2 rounded-lg border text-sm shadow-xl"
+         :class="toastError ? 'bg-red-950/95 border-red-700 text-red-200'
+                            : 'bg-emerald-950/95 border-emerald-700 text-emerald-200'"
+         x-text="toast"></div>
+
+    <div class="mb-5 flex flex-wrap items-center justify-between gap-3">
+        <div>
+            <h1 class="text-2xl font-bold text-gray-100">Řízení zón</h1>
+            <p class="text-gray-400 text-sm mt-1">
+                Režim: <span class="text-emerald-400 font-semibold" x-text="modeLabels[mode] || mode"></span>
+                <span x-show="config.dry_run" class="ml-2 text-sky-300">🧪 zkušební provoz</span>
+            </p>
+        </div>
+        <a href="/" class="text-sm text-blue-400 hover:text-blue-300">← Dashboard</a>
+    </div>
+
+    <div x-show="!zonesConfigured" class="mb-4 text-sm text-amber-300 bg-amber-500/10 border border-amber-600/40 rounded-lg px-4 py-3">
+        Zóny nejsou nastavené – vytvořte <code>data/zones.json</code> podle šablony <code>zones.json.example</code>.
+    </div>
+
+    <!-- Záložky -->
+    <div class="flex flex-wrap border-b border-gray-700 mb-5">
+        <template x-for="t in tabs" :key="t.id">
+            <button @click="tab = t.id; if (t.id === 'journal') loadJournal()"
+                    :class="tab === t.id ? 'text-white border-b-2 border-blue-500' : 'text-gray-400 hover:text-gray-200'"
+                    class="px-4 py-2.5 text-sm font-semibold" x-text="t.label"></button>
+        </template>
+    </div>
+
+    <!-- ── PROGRAM ── -->
+    <div x-show="tab === 'program'" class="space-y-4">
+        <div class="grid grid-cols-7 gap-1 text-xs">
+            <template x-for="d in days" :key="d.id">
+                <button @click="day = d.id"
+                        :class="day === d.id ? 'bg-blue-700 text-white' : 'bg-gray-800 text-gray-300 hover:bg-gray-700'"
+                        class="rounded-lg p-2 text-left border border-gray-700 min-h-[5rem] align-top">
+                    <div class="font-semibold mb-1" x-text="d.label"></div>
+                    <template x-for="b in (config.program?.[d.id] || [])" :key="b.from">
+                        <div class="tabular-nums text-[11px] leading-4"
+                             x-text="b.from + ' ' + zones.map(z => b.targets[z.id]).join('/')"></div>
+                    </template>
+                </button>
+            </template>
+        </div>
+        <div class="text-xs text-gray-500" x-text="'Teploty v přehledu: ' + zones.map(z => z.name).join(' / ')"></div>
+
+        <div class="bg-gray-800 border border-gray-700 rounded-xl p-4">
+            <div class="font-semibold text-gray-100 mb-3" x-text="'Bloky – ' + dayLabel(day)"></div>
+            <div class="space-y-2">
+                <template x-for="(b, i) in (config.program?.[day] || [])" :key="i">
+                    <div class="flex flex-wrap items-center gap-3 bg-gray-900/60 rounded-lg px-3 py-2">
+                        <label class="text-xs text-gray-400">od
+                            <input type="time" x-model="b.from"
+                                   class="ml-1 bg-gray-800 border border-gray-600 rounded px-2 py-1 text-gray-100">
+                        </label>
+                        <template x-for="z in zones" :key="z.id">
+                            <label class="text-xs text-gray-400"><span x-text="z.name"></span>
+                                <input type="number" step="0.5" min="5" max="30" x-model.number="b.targets[z.id]"
+                                       class="ml-1 w-20 bg-gray-800 border border-gray-600 rounded px-2 py-1 text-gray-100"> °C
+                            </label>
+                        </template>
+                        <button @click="config.program[day].splice(i, 1)"
+                                :disabled="config.program[day].length <= 1"
+                                class="ml-auto text-xs text-red-400 hover:text-red-300 disabled:opacity-30">Smazat</button>
+                    </div>
+                </template>
+            </div>
+            <button @click="addBlock()" class="mt-3 text-sm text-blue-400 hover:text-blue-300">+ Přidat blok</button>
+
+            <div class="mt-4 pt-3 border-t border-gray-700 flex flex-wrap items-center gap-2 text-xs">
+                <span class="text-gray-400">Kopírovat tento den na:</span>
+                <template x-for="d in days" :key="d.id">
+                    <label class="flex items-center gap-1 text-gray-300" x-show="d.id !== day">
+                        <input type="checkbox" :value="d.id" x-model="copyTargets"> <span x-text="d.label"></span>
+                    </label>
+                </template>
+                <button @click="copyDay()" :disabled="!copyTargets.length"
+                        class="px-2.5 py-1 rounded bg-gray-700 hover:bg-gray-600 text-gray-100 disabled:opacity-40">Kopírovat</button>
+            </div>
+        </div>
+        <button @click="save({ program: config.program }, 'Program uložen.')"
+                class="px-5 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white font-semibold">Uložit program</button>
+    </div>
+
+    <!-- ── AUTOMATIKA ── -->
+    <div x-show="tab === 'automation'" class="space-y-4">
+        <div class="bg-gray-800 border border-gray-700 rounded-xl p-4 space-y-3">
+            <div class="font-semibold text-gray-100">Cílové teploty</div>
+            <template x-for="z in zones" :key="z.id">
+                <label class="flex items-center justify-between text-sm text-gray-300 max-w-sm">
+                    <span x-text="z.name"></span>
+                    <span><input type="number" step="0.5" min="5" max="30"
+                                 x-model.number="config.automation.targets[z.id]"
+                                 class="w-24 bg-gray-900 border border-gray-600 rounded px-2 py-1 text-gray-100"> °C</span>
+                </label>
+            </template>
+        </div>
+        <div class="bg-gray-800 border border-gray-700 rounded-xl p-4 space-y-3" x-show="config.automation">
+            <label class="flex items-center gap-2 text-sm text-gray-200">
+                <input type="checkbox" x-model="config.automation.night_setback.enabled"> Noční útlum
+            </label>
+            <div class="flex flex-wrap gap-4 text-sm text-gray-300">
+                <label>od <input type="time" x-model="config.automation.night_setback.from"
+                                 class="ml-1 bg-gray-900 border border-gray-600 rounded px-2 py-1 text-gray-100"></label>
+                <label>do <input type="time" x-model="config.automation.night_setback.to"
+                                 class="ml-1 bg-gray-900 border border-gray-600 rounded px-2 py-1 text-gray-100"></label>
+                <label>o <input type="number" step="0.5" min="0" max="10"
+                                x-model.number="config.automation.night_setback.delta_c"
+                                class="ml-1 w-20 bg-gray-900 border border-gray-600 rounded px-2 py-1 text-gray-100"> °C níž</label>
+            </div>
+            <p class="text-xs text-gray-500">Úpravy podle slunce, předpovědi a vysoušení koupelny přijdou v dalším kroku.</p>
+        </div>
+        <button @click="save({ automation: config.automation }, 'Automatika uložena.')"
+                class="px-5 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white font-semibold">Uložit automatiku</button>
+    </div>
+
+    <!-- ── DOVOLENÁ ── -->
+    <div x-show="tab === 'vacation'" class="space-y-4">
+        <div class="bg-gray-800 border border-gray-700 rounded-xl p-4 space-y-3" x-show="config.vacation">
+            <label class="block text-sm text-gray-300">Návrat
+                <input type="datetime-local" x-model="vacationReturn"
+                       class="ml-2 bg-gray-900 border border-gray-600 rounded px-2 py-1 text-gray-100">
+            </label>
+            <label class="block text-sm text-gray-300">Předtopení
+                <input type="number" step="1" min="0" max="72" x-model.number="config.vacation.preheat_hours"
+                       class="ml-2 w-20 bg-gray-900 border border-gray-600 rounded px-2 py-1 text-gray-100"> h před návratem
+            </label>
+            <div class="text-sm text-gray-200 pt-2">Teploty nepřítomnosti</div>
+            <template x-for="z in zones" :key="z.id">
+                <label class="flex items-center justify-between text-sm text-gray-300 max-w-sm">
+                    <span x-text="z.name"></span>
+                    <span><input type="number" step="0.5" min="5" max="30"
+                                 x-model.number="config.vacation.away_targets[z.id]"
+                                 class="w-24 bg-gray-900 border border-gray-600 rounded px-2 py-1 text-gray-100"> °C</span>
+                </label>
+            </template>
+            <p class="text-xs text-gray-500">Po návratu se aplikace vrátí do režimu, který byl aktivní před dovolenou.</p>
+        </div>
+        <div class="flex flex-wrap gap-3">
+            <button @click="saveVacation(false)"
+                    class="px-5 py-2 rounded-lg bg-gray-700 hover:bg-gray-600 text-white font-semibold">Uložit</button>
+            <button @click="saveVacation(true)" x-show="mode !== 'vacation'"
+                    class="px-5 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white font-semibold">Uložit a zapnout dovolenou</button>
+        </div>
+    </div>
+
+    <!-- ── NASTAVENÍ ── -->
+    <div x-show="tab === 'settings'" class="space-y-4">
+        <div class="bg-gray-800 border border-gray-700 rounded-xl p-4 space-y-3 text-sm text-gray-300">
+            <label class="flex items-center justify-between max-w-md">Nouzové minimum
+                <span><input type="number" step="0.5" min="5" max="18" x-model.number="config.emergency_min_c"
+                             class="w-20 bg-gray-900 border border-gray-600 rounded px-2 py-1 text-gray-100"> °C</span>
+            </label>
+            <label class="flex items-center justify-between max-w-md">Délka přebití (Automatika, Dovolená)
+                <span><input type="number" step="0.25" min="0.25" max="48" x-model.number="config.override_hours"
+                             class="w-20 bg-gray-900 border border-gray-600 rounded px-2 py-1 text-gray-100"> h</span>
+            </label>
+            <label class="flex items-center justify-between max-w-md">Maximální stáří hodnot čidel
+                <span><input type="number" step="1" min="1" max="240" x-model.number="config.sensor_max_age_min"
+                             class="w-20 bg-gray-900 border border-gray-600 rounded px-2 py-1 text-gray-100"> min</span>
+            </label>
+            <label class="flex items-center gap-2 pt-2 border-t border-gray-700">
+                <input type="checkbox" x-model="config.dry_run">
+                <span>🧪 Zkušební provoz – řízení jen počítá a zapisuje deník, nic neposílá</span>
+            </label>
+            <p class="text-xs text-amber-400" x-show="!config.dry_run">
+                Mimo zkušební provoz posílá aplikace termostatům POER a klimatizaci skutečné příkazy.
+            </p>
+        </div>
+        <button @click="save({ emergency_min_c: config.emergency_min_c, override_hours: config.override_hours,
+                               sensor_max_age_min: config.sensor_max_age_min, dry_run: config.dry_run },
+                             'Nastavení uloženo.')"
+                class="px-5 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white font-semibold">Uložit nastavení</button>
+    </div>
+
+    <!-- ── DENÍK ── -->
+    <div x-show="tab === 'journal'">
+        <div class="flex justify-end mb-2">
+            <button @click="loadJournal()" class="text-xs text-blue-400 hover:text-blue-300">🔄 Obnovit</button>
+        </div>
+        <div class="bg-gray-800 border border-gray-700 rounded-xl overflow-x-auto">
+            <table class="w-full text-sm">
+                <thead class="text-xs text-gray-500 border-b border-gray-700">
+                    <tr><th class="text-left p-2">Čas</th><th class="text-left p-2">Zóna</th>
+                        <th class="text-right p-2">Vnitřní</th><th class="text-right p-2">Cíl</th>
+                        <th class="text-left p-2">Důvod</th><th class="text-left p-2">Akce</th></tr>
+                </thead>
+                <tbody>
+                    <template x-for="(e, i) in journal" :key="i">
+                        <tr class="border-b border-gray-700/50 text-gray-300">
+                            <td class="p-2 tabular-nums whitespace-nowrap" x-text="e.ts.replace('T', ' ')"></td>
+                            <td class="p-2" x-text="zoneName(e.zone)"></td>
+                            <td class="p-2 text-right tabular-nums" x-text="e.indoor_c != null ? e.indoor_c.toFixed(1) : '—'"></td>
+                            <td class="p-2 text-right tabular-nums" x-text="e.target_c != null ? e.target_c.toFixed(1) : '—'"></td>
+                            <td class="p-2" x-text="e.reason"></td>
+                            <td class="p-2 text-xs">
+                                <span x-text="e.actions.join(', ')"></span>
+                                <span x-show="e.dry_run && e.actions.length" class="text-sky-300"> (zkušebně)</span>
+                            </td>
+                        </tr>
+                    </template>
+                    <tr x-show="!journal.length"><td colspan="6" class="p-4 text-center text-gray-500">Deník je prázdný.</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<script>
+document.addEventListener('alpine:init', () => {
+    Alpine.data('controlPage', () => ({
+        tab: 'program',
+        tabs: [
+            { id: 'program',    label: '📅 Program' },
+            { id: 'automation', label: '🤖 Automatika' },
+            { id: 'vacation',   label: '🏖️ Dovolená' },
+            { id: 'settings',   label: '⚙️ Nastavení' },
+            { id: 'journal',    label: '📒 Deník' },
+        ],
+        days: [
+            { id: 'mon', label: 'Po' }, { id: 'tue', label: 'Út' }, { id: 'wed', label: 'St' },
+            { id: 'thu', label: 'Čt' }, { id: 'fri', label: 'Pá' }, { id: 'sat', label: 'So' },
+            { id: 'sun', label: 'Ne' },
+        ],
+        modeLabels: { manual: 'Ručně', program: 'Program', automation: 'Automatika', vacation: 'Dovolená' },
+        day: ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'][new Date().getDay()],
+        mode: 'manual',
+        zonesConfigured: true,
+        zones: [],
+        config: { program: {}, automation: { targets: {}, night_setback: {} },
+                  vacation: { away_targets: {} } },
+        vacationReturn: '',
+        copyTargets: [],
+        journal: [],
+        toast: '',
+        toastError: false,
+
+        async init() {
+            await this.load();
+        },
+
+        async load() {
+            const r = await fetch('/api/control/');
+            if (!r.ok) return this.notify('Konfiguraci řízení nelze načíst', true);
+            const d = await r.json();
+            this.mode = d.mode;
+            this.zonesConfigured = d.zones_configured;
+            this.zones = d.zones.map(z => ({ id: z.id, name: z.name }));
+            this.config = d.config;
+            // datetime-local potřebuje tvar YYYY-MM-DDTHH:MM
+            this.vacationReturn = (d.config.vacation.return_at || '').slice(0, 16);
+        },
+
+        dayLabel(id) {
+            const names = { mon: 'pondělí', tue: 'úterý', wed: 'středa', thu: 'čtvrtek',
+                            fri: 'pátek', sat: 'sobota', sun: 'neděle' };
+            return names[id] || id;
+        },
+
+        zoneName(id) {
+            if (!id) return '—';
+            return (this.zones.find(z => z.id === id) || {}).name || id;
+        },
+
+        addBlock() {
+            const blocks = this.config.program[this.day];
+            const last = blocks[blocks.length - 1];
+            blocks.push({ from: '12:00', targets: { ...last.targets } });
+        },
+
+        copyDay() {
+            const source = JSON.stringify(this.config.program[this.day]);
+            for (const d of this.copyTargets) this.config.program[d] = JSON.parse(source);
+            this.notify(`Zkopírováno na ${this.copyTargets.length} dní – nezapomeňte uložit.`);
+            this.copyTargets = [];
+        },
+
+        async save(changes, okMessage) {
+            const r = await fetch('/api/control/config', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(changes),
+            });
+            const d = await r.json().catch(() => ({}));
+            if (!r.ok) {
+                this.notify(d.detail || 'Uložení selhalo', true);
+                return false;
+            }
+            this.config = d;
+            this.notify(okMessage);
+            return true;
+        },
+
+        async saveVacation(activate) {
+            const vacation = { ...this.config.vacation, return_at: this.vacationReturn || null };
+            if (!(await this.save({ vacation }, 'Dovolená uložena.')) || !activate) return;
+            const r = await fetch('/api/control/mode', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ mode: 'vacation' }),
+            });
+            const d = await r.json().catch(() => ({}));
+            if (!r.ok) return this.notify(d.detail || 'Dovolenou nelze zapnout', true);
+            this.mode = 'vacation';
+            this.notify('Režim Dovolená zapnut.');
+        },
+
+        async loadJournal() {
+            const r = await fetch('/api/control/journal?limit=200');
+            if (r.ok) this.journal = await r.json();
+        },
+
+        notify(message, isError = false) {
+            this.toast = message;
+            this.toastError = isError;
+            setTimeout(() => { this.toast = ''; }, 3500);
+        },
+    }));
+});
+</script>
+{% endblock %}

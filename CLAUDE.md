@@ -55,6 +55,7 @@ src/
 ├── poer_api.py             # POER thermostat cloud API client
 ├── profile_limits.py       # Device capability/limit lookups from device_profile.json
 ├── env_config.py           # .env loading (load_local_env), used by main.py before other imports
+├── zones/                  # Zone control: config (zones.json/control.json), sensors, decide (pure), loop
 └── web/                     # Primary web application
     ├── app.py                # FastAPI instance, lifespan (startup/shutdown), MQTT→WS bridge, background loops
     ├── settings.py            # Env-driven settings (get_settings())
@@ -63,7 +64,8 @@ src/
     └── routes/
         ├── devices.py          # GET /api/devices/, /api/devices/{id}/status
         ├── control.py          # POST /api/devices/{id}/command
-        ├── mode.py             # GET/POST /api/mode/  (AUTO ↔ HAND)
+        ├── mode.py             # GET/POST /api/mode/  (legacy AUTO/HAND mapping onto zone modes)
+        ├── zones.py            # /api/control/* — zone mode, program, automation, vacation, overrides, journal
         ├── schedule.py         # CRUD /api/schedule/entries (HAND scheduler)
         ├── energy.py           # GET /api/energy/{id} (view+offset), /{id}/export (CSV)
         ├── weather.py          # GET /api/weather/forecast, /config
@@ -90,18 +92,28 @@ Never call `execute_plan` / `send_poer_command` directly from web code — that 
 
 ### FastAPI lifespan (`src/web/app.py`)
 
-On startup: initializes a shared `ThinQAPI` instance on `app.state.api` (if this fails, the app still starts — endpoints needing the API return 503), pre-caches AC device IDs, connects MQTT (bridges messages to WebSocket clients via `_on_mqtt_message`), loads persisted `control_mode` (AUTO/HAND) from `data/state.json`, loads the cached weather forecast from disk, and starts two background tasks:
+On startup: initializes a shared `ThinQAPI` instance on `app.state.api` (if this fails, the app still starts — endpoints needing the API return 503), pre-caches AC device IDs, connects MQTT (bridges messages to WebSocket clients via `_on_mqtt_message`), creates the zone controller (`app.state.zones`, mode from `data/control.json`), loads the cached weather forecast from disk, and starts background tasks (scheduler, weather refresh, AC regulation, MQTT watchdog, history collector, zone loop), among them:
 - `_scheduler_loop` — checks `data/schedule.json` every minute, fires HAND scheduler time_on/time_off actions.
 - `_weather_refresh_loop` — refetches ČHMÚ forecast on `weather.refresh_interval_hours` (default 3h), independent of control_mode.
 
 Middleware order matters: `CloudflareAccessMiddleware` must be the outermost wrapper (added last) so unauthenticated traffic is rejected before hitting the rate limiter.
 
-### AUTO vs HAND
+### Zone control and modes
 
-- **AUTO** — seasonal rules (`automation_rules.py`) + PID-like regulation (`thermal_controller.py`) drive the device automatically.
-- **HAND** — manual control via web/CLI + HAND scheduler (`data/schedule.json`) entries.
+Modes (`data/control.json`, `/api/control/mode`): `manual` (Ručně), `program` (weekly blocks),
+`automation` (zone targets + optional night setback), `vacation` (away temps, preheat before return,
+then back to the previous mode). `data/zones.json` (template `zones.json.example`, not committed) defines
+zones, heaters (`poer:<id>` with `offset_c`, `lg:*`) and the sensor registry with ordered role sources.
 
-Mode is persisted in `data/state.json` and toggled via `/api/mode/`.
+- `zones/decide.py` is pure: emergency minimum > fireplace pause > temporary override > mode target.
+- `zones/loop.py` (`ZoneController`, `app.state.zones`) ticks every 60 s: sensors from caches (POER shared
+  cache ≤ 2 min, LG status from MQTT/regulation, ČHMÚ cache, `http` sensors) → decision → journal →
+  POER setpoints via the arbiter (only when the setpoint changes) and a zone target for AC regulation.
+- **`dry_run` (default true)** = nothing is sent at all (neither POER nor AC regulation), only the journal.
+- A manual temperature change (web) outside `manual` creates a temporary override of the device's zone.
+- Legacy HAND/AUTO is derived: `manual` → HAND (HAND scheduler runs), other modes → AUTO
+  (`_automation_loop` regulates AC toward the zone target, with `setpoint_correction_c`).
+  `/api/mode/` remains as a compatibility mapping; `state.json` is only read once to migrate.
 
 ### Temperature correction / indoor proxy
 

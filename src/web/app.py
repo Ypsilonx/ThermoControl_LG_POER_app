@@ -41,6 +41,7 @@ from web.ratelimit import RateLimitMiddleware
 from web.settings import get_settings
 from history.collector import HistoryCollector, parse_lg_push
 from history.store import HistoryStore
+from zones.loop import ZoneController
 from web.routes.devices import router as devices_router
 from web.routes.control import router as control_router
 from web.routes.ws import router as ws_router, manager as ws_manager
@@ -50,27 +51,12 @@ from web.routes.schedule import router as schedule_router
 from web.routes.energy import router as energy_router
 from web.routes.poer import router as poer_router
 from web.routes.history import router as history_router
+from web.routes.zones import router as zones_router
 
 logger = logging.getLogger(__name__)
 BASE_DIR = Path(__file__).parent
-_STATE_FILE = BASE_DIR.parent.parent / "data" / "state.json"
-
-
-def _load_control_mode() -> str:
-    """
-    Načte naposledy uložený control_mode z data/state.json.
-
-    Returns:
-        str: "AUTO" nebo "HAND". Výchozí je "AUTO" pokud soubor neexistuje nebo je chybný.
-    """
-    try:
-        if _STATE_FILE.exists():
-            data = json.loads(_STATE_FILE.read_text(encoding="utf-8"))
-            mode = data.get("control_mode", "AUTO")
-            return mode if mode in ("AUTO", "HAND") else "AUTO"
-    except Exception as exc:
-        logger.warning("Nelze načíst state.json: %s", exc)
-    return "AUTO"
+_DATA_DIR = BASE_DIR.parent.parent / "data"
+_STATE_FILE = _DATA_DIR / "state.json"
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +126,48 @@ def _dispatch_schedule_action(
     task.add_done_callback(app.state.background_tasks.discard)
 
 
+def _proxy_offset_c() -> float:
+    """Korekce vnitřního čidla AC z ``automation_rules.json`` (zdroj čidla ``lg``)."""
+    rules, _ = load_automation_rules(_DATA_DIR / "automation_rules.json")
+    return float(rules.weather.ac_indoor_temperature_proxy_offset_c)
+
+
+def _create_zone_controller(app: FastAPI) -> ZoneController:
+    """
+    Vytvoří řízení zón nad ``data/zones.json`` a ``data/control.json``.
+
+    Args:
+        app: FastAPI instance (arbitr a cache počasí)
+
+    Returns:
+        ZoneController: Načtené řízení (bez zones.json jen drží režim)
+    """
+    controller = ZoneController(
+        _DATA_DIR / "zones.json",
+        _DATA_DIR / "control.json",
+        _STATE_FILE,
+        os.getenv("LG_POER_API_KEY", "").strip(),
+        app.state.arbiter,
+        weather_cache=lambda: getattr(app.state, "weather_cache", None),
+        proxy_offset_c=_proxy_offset_c,
+    )
+    controller.reload()
+    logger.info("🏠 Režim řízení: %s (zkušební provoz: %s)",
+                controller.control["mode"], controller.control["dry_run"])
+    return controller
+
+
+async def _broadcast_zones(app: FastAPI) -> None:
+    """Pošle WS klientům aktuální stav zón (po každém průchodu smyčky)."""
+    zones: ZoneController = app.state.zones
+    await ws_manager.broadcast({
+        "type": "zones_update",
+        "data": {"mode": zones.control["mode"], "dry_run": zones.control["dry_run"],
+                 "zones": list(zones.zone_states.values())},
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+
+
 def _create_history_collector() -> HistoryCollector | None:
     """
     Vytvoří sběrač historie podle nastavení (LG_HISTORY_*).
@@ -166,15 +194,37 @@ def _create_history_collector() -> HistoryCollector | None:
 AUTOMATION_TICK_SECONDS = 60
 
 
-def _job_for_decision(api: ThinQAPI, device_id: str, decision, policy: ThermalControlPolicy):
+def _ac_temperature(decision, policy: ThermalControlPolicy, setpoint_correction_c: float
+                    ) -> float:
+    """
+    Teplota, která se nastaví na klimatizaci.
+
+    Args:
+        decision:              ``ThermalControlDecision``
+        policy:                Efektivní politika (záloha, když rozhodnutí cíl nemá)
+        setpoint_correction_c: Posun z teploty místnosti na teplotu AC (čidlo AC u stropu
+                               měří víc); 0 pokud je cíl už v jednotkách AC
+
+    Returns:
+        float: Teplota pro AC zaokrouhlená na 0,1 °C
+    """
+    target = decision.target_temperature_c
+    if target is None:
+        target = policy.target_temperature_c
+    return round(float(target) + setpoint_correction_c, 1)
+
+
+def _job_for_decision(api: ThinQAPI, device_id: str, decision, policy: ThermalControlPolicy,
+                      setpoint_correction_c: float = 0.0):
     """
     Sestaví úlohu pro rozhodnutí PID regulace.
 
     Args:
-        api:       Inicializovaná ThinQAPI instance.
-        device_id: ThinQ ID cílové klimatizace.
-        decision:  ``ThermalControlDecision`` z ``decide_thermal_control``.
-        policy:    Efektivní politika (výchozí cílová teplota).
+        api:                   Inicializovaná ThinQAPI instance.
+        device_id:             ThinQ ID cílové klimatizace.
+        decision:              ``ThermalControlDecision`` z ``decide_thermal_control``.
+        policy:                Efektivní politika (výchozí cílová teplota).
+        setpoint_correction_c: Posun teploty místnosti na teplotu AC (viz ``_ac_temperature``).
 
     Returns:
         JobFactory | None: Úloha, nebo None pokud rozhodnutí nic neodesílá.
@@ -182,15 +232,39 @@ def _job_for_decision(api: ThinQAPI, device_id: str, decision, policy: ThermalCo
     if decision.action == "power_off":
         return lg_command_job(api, device_id, "power_off", ())
     if decision.action == "run" and decision.mode:
-        target_temp = decision.target_temperature_c
-        if target_temp is None:
-            target_temp = policy.target_temperature_c
         return lg_apply_action_job(api, device_id, {
             "mode": decision.mode,
-            "temperature": round(float(target_temp), 1),
+            "temperature": _ac_temperature(decision, policy, setpoint_correction_c),
             "wind_strength": decision.wind_strength,
         })
     return None
+
+
+def _regulation_policy(
+    base_policy: ThermalControlPolicy,
+    zones: ZoneController | None,
+    device_id: str,
+    current_target_c: float | None,
+) -> tuple[ThermalControlPolicy, bool, bool]:
+    """
+    Politika regulace klimatizace: cíl zóny, nebo (postaru) aktuální setpoint AC.
+
+    Args:
+        base_policy:      Výchozí politika
+        zones:            Řízení zón (``app.state.zones``) nebo None
+        device_id:        ThinQ Device ID
+        current_target_c: Aktuální setpoint klimatizace
+
+    Returns:
+        tuple: (politika, přeskočit regulaci – zóna pozastavena, cíl je ze zóny)
+    """
+    zone_target = zones.ac_target(device_id) if zones is not None else None
+    if zone_target is not None:
+        target_c, paused = zone_target
+        return derive_policy_for_target(base_policy, target_c), paused, True
+    if current_target_c is not None:
+        return derive_policy_for_target(base_policy, current_target_c), False, False
+    return base_policy, False, False
 
 
 async def _run_thermal_regulation_for_device(
@@ -230,6 +304,9 @@ async def _run_thermal_regulation_for_device(
     except Exception as exc:
         logger.warning("⚠️ Automation: nelze načíst stav %s...: %s", device_id[:8], exc)
         return
+    zones: ZoneController | None = getattr(app.state, "zones", None)
+    if zones is not None and isinstance(status, dict):
+        zones.record_lg_status(device_id, status, full=True)
 
     if indoor_source_cfg == "poer_api":
         indoor_raw_c = poer_temp_c
@@ -258,15 +335,19 @@ async def _run_thermal_regulation_for_device(
     current_mode = str(status.get("airConJobMode", {}).get("currentJobMode", "")).upper()
     power_on = power_mode == "POWER_ON"
 
-    effective_policy = base_policy
     target_node = status.get("temperature", {}) if isinstance(status, dict) else {}
     current_target_raw = target_node.get("targetTemperature") if isinstance(target_node, dict) else None
     try:
         current_target_c = float(current_target_raw) if current_target_raw is not None else None
     except (TypeError, ValueError):
         current_target_c = None
-    if current_target_c is not None:
-        effective_policy = derive_policy_for_target(policy=base_policy, target_temperature_c=current_target_c)
+    effective_policy, paused, from_zone = _regulation_policy(
+        base_policy, zones, device_id, current_target_c
+    )
+    if paused:
+        return
+    # Cíl zóny je teplota místnosti – na AC se posílá s korekcí čidla AC.
+    setpoint_correction_c = weather_cfg.setpoint_correction_c if from_zone else 0.0
 
     thermal_states: dict[str, ThermalControlState] = app.state.thermal_states
     state = thermal_states.get(device_id) or ThermalControlState()
@@ -320,7 +401,7 @@ async def _run_thermal_regulation_for_device(
     if last_sig == signature and last_at is not None and (now_local - last_at) < cooldown:
         return
 
-    job = _job_for_decision(api, device_id, decision, effective_policy)
+    job = _job_for_decision(api, device_id, decision, effective_policy, setpoint_correction_c)
     if job is None:
         return
 
@@ -362,7 +443,9 @@ async def _automation_loop(app: FastAPI) -> None:
     tuto mezeru zavírá – používá moduly ``automation_rules`` a
     ``thermal_controller`` a stejnou command pipeline jako HAND scheduler.
 
-    Běží pouze pokud je ``control_mode == "AUTO"``. Indoor teplota z POER
+    Běží ve všech režimech kromě Ručně a mimo zkušební provoz zón
+    (``_ac_regulation_active``) a reguluje k cíli zóny; bez ``zones.json``
+    k aktuálnímu setpointu klimatizace. Indoor teplota z POER
     cloudu se cachuje na interval ``weather.refresh_interval_hours``, aby se
     cloud API nezatěžovalo každou minutu.
 
@@ -379,7 +462,7 @@ async def _automation_loop(app: FastAPI) -> None:
         await asyncio.sleep(AUTOMATION_TICK_SECONDS)
 
         try:
-            if getattr(app.state, "control_mode", "AUTO") != "AUTO":
+            if not _ac_regulation_active(app):
                 continue
 
             api: ThinQAPI | None = getattr(app.state, "api", None)
@@ -494,6 +577,27 @@ async def _mqtt_watchdog_loop(app: FastAPI, on_message) -> None:
             logger.error("❌ MQTT watchdog: neočekávaná chyba: %s", exc)
 
 
+def _ac_regulation_active(app: FastAPI) -> bool:
+    """
+    Smí regulace klimatizace posílat příkazy?
+
+    Ne v režimu Ručně a ne ve zkušebním provozu zón (tam se nesmí posílat nic).
+    Bez ``zones.json`` se zkušební provoz neuplatní – regulace jede postaru.
+    """
+    zones: ZoneController | None = getattr(app.state, "zones", None)
+    if zones is None:
+        return False
+    if zones.control.get("mode") == "manual":
+        return False
+    return zones.zones is None or not zones.control.get("dry_run", True)
+
+
+def _legacy_mode(app: FastAPI) -> str:
+    """Přepínač HAND/AUTO odvozený z režimu zón (Ručně → HAND, ostatní → AUTO)."""
+    zones: ZoneController | None = getattr(app.state, "zones", None)
+    return zones.legacy_mode if zones is not None else "HAND"
+
+
 def _scheduler_enabled(control_mode: str, settings: dict) -> bool:
     """
     Rozhodne, zda má plánovač v této minutě spouštět akce.
@@ -551,8 +655,7 @@ async def _scheduler_loop(app: FastAPI) -> None:
             sched_data = json.loads(schedule_path.read_text(encoding="utf-8"))
             settings = sched_data.get("settings", {})
 
-            control_mode = getattr(app.state, "control_mode", "AUTO")
-            if not _scheduler_enabled(control_mode, settings):
+            if not _scheduler_enabled(_legacy_mode(app), settings):
                 continue
 
             api: ThinQAPI | None = getattr(app.state, "api", None)
@@ -698,12 +801,12 @@ async def lifespan(app: FastAPI):
         app.state.api_error = str(exc)
         app.state.known_device_ids = set()
 
-    # Inicializace sdíleného in-memory stavu (mode se načítá z state.json)
-    app.state.control_mode = _load_control_mode()
-
     # Jediná brána pro příkazy zařízením – web, scheduler i automatika.
     app.state.arbiter = CommandArbiter()
     app.state.background_tasks = set()
+
+    # Řízení zón: režim, program, dovolená, přebití (data/zones.json + control.json).
+    app.state.zones = _create_zone_controller(app)
 
     # Historie dat pro ladění automatiky (data/history.db).
     app.state.history = _create_history_collector()
@@ -757,6 +860,7 @@ async def lifespan(app: FastAPI):
                 asyncio.run_coroutine_threadsafe(
                     history.record_lg_status(device_id, device_status), loop
                 )
+            loop.call_soon_threadsafe(app.state.zones.record_lg_status, device_id, device_status)
         except Exception as exc:
             logger.error(f"❌ MQTT→WS bridge chyba: {exc}")
 
@@ -780,6 +884,7 @@ async def lifespan(app: FastAPI):
     weather_task = asyncio.create_task(_weather_refresh_loop(app))
     automation_task = asyncio.create_task(_automation_loop(app))
     mqtt_watchdog_task = asyncio.create_task(_mqtt_watchdog_loop(app, _on_mqtt_message))
+    zones_task = asyncio.create_task(app.state.zones.run(on_update=lambda: _broadcast_zones(app)))
     history_task = None
     if app.state.history is not None:
         # Úvodní stav LG čte až úloha sběru – start serveru na LG nečeká.
@@ -794,6 +899,7 @@ async def lifespan(app: FastAPI):
     weather_task.cancel()
     automation_task.cancel()
     mqtt_watchdog_task.cancel()
+    zones_task.cancel()
     if history_task is not None:
         history_task.cancel()
     try:
@@ -812,6 +918,10 @@ async def lifespan(app: FastAPI):
         await mqtt_watchdog_task
     except asyncio.CancelledError:
         logger.info("🔧 MQTT watchdog zastaven")
+    try:
+        await zones_task
+    except asyncio.CancelledError:
+        logger.info("🏠 Řízení zón zastaveno")
     if history_task is not None:
         try:
             await history_task
@@ -820,6 +930,7 @@ async def lifespan(app: FastAPI):
         # Hranice pro intervaly topení LG – neběží přes dobu, kdy server nejede.
         await app.state.history.mark_stopped()
     await app.state.arbiter.close()
+    await app.state.zones.drain()
     logger.info("🔧 Arbitr příkazů ukončen")
 
     api_instance: ThinQAPI | None = getattr(app.state, "api", None)
@@ -873,6 +984,7 @@ app.include_router(schedule_router)
 app.include_router(energy_router)
 app.include_router(poer_router)
 app.include_router(history_router)
+app.include_router(zones_router)
 
 
 # ---------------------------------------------------------------------------
@@ -907,6 +1019,24 @@ async def dashboard(request: Request):
         request=request,
         name="dashboard.html",
         context={"active_page": "dashboard"},
+    )
+
+
+@app.get("/control", response_class=HTMLResponse)
+async def control_page(request: Request):
+    """
+    Stránka řízení zón – program, automatika, dovolená, nastavení a deník.
+
+    Args:
+        request: HTTP požadavek (předáván do Jinja2 kontextu).
+
+    Returns:
+        HTMLResponse: Vyrendrovaný control.html.
+    """
+    return templates.TemplateResponse(
+        request=request,
+        name="control.html",
+        context={"active_page": "control"},
     )
 
 

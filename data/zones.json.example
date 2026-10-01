@@ -1,0 +1,34 @@
+{
+  "zones": {
+    "kuchoobyvak": {
+      "name": "Kuchoobývák",
+      "heaters": [
+        {"device": "lg:*"},
+        {"device": "poer:YOUR_POER_KITCHEN_ID", "offset_c": -1.0}
+      ],
+      "roles": {
+        "indoor_temperature": ["poer_kuchoobyvak", "lg_klima"],
+        "outdoor_temperature": ["chmi"],
+        "fireplace": ["zasuvka_cerpadlo"]
+      }
+    },
+    "koupelna": {
+      "name": "Koupelna",
+      "heaters": [
+        {"device": "poer:YOUR_POER_BATHROOM_ID"}
+      ],
+      "roles": {
+        "indoor_temperature": ["poer_koupelna"],
+        "indoor_humidity": ["poer_koupelna"],
+        "outdoor_temperature": ["chmi"]
+      }
+    }
+  },
+  "sensors": {
+    "poer_kuchoobyvak": {"source": "poer", "device_id": "YOUR_POER_KITCHEN_ID"},
+    "poer_koupelna": {"source": "poer", "device_id": "YOUR_POER_BATHROOM_ID"},
+    "lg_klima": {"source": "lg"},
+    "chmi": {"source": "chmi", "max_age_min": 240},
+    "zasuvka_cerpadlo": {"source": "smart_plug"}
+  }
+}

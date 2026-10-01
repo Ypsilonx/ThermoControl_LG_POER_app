@@ -133,6 +133,11 @@ async def send_command(device_id: str, body: CommandRequest, request: Request):
         logger.error(f"Chyba při provádění příkazu '{body.command}': {exc}")
         raise HTTPException(status_code=503, detail=f"Chyba při odesílání příkazu: {exc}")
 
+    zones = getattr(request.app.state, "zones", None)
+    if body.command == "set_temperature" and zones is not None and body.args:
+        # Ruční teplota v režimu Program/Automatika/Dovolená = dočasné přebití zóny.
+        zones.add_override("lg", device_id, float(body.args[0]))
+
     if not outcome.sent:
         logger.info(f"Příkaz '{body.command}' přeskočen: {outcome.skip_reason}")
         return CommandResponse(skipped=True, skip_reason=outcome.skip_reason, steps=[])

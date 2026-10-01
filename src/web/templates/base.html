@@ -48,6 +48,10 @@
 
             <!-- Odkazy -->
             <div class="flex items-center gap-4 text-xs text-gray-500">
+                <a href="/" class="hover:text-gray-300 transition-colors"
+                   :class="'{{ active_page }}' === 'dashboard' ? 'text-gray-200' : ''">Dashboard</a>
+                <a href="/control" class="hover:text-gray-300 transition-colors"
+                   :class="'{{ active_page }}' === 'control' ? 'text-gray-200' : ''">Řízení</a>
                 <a href="/health" class="hover:text-gray-300 transition-colors">/health</a>
             </div>
         </div>
