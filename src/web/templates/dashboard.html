@@ -864,8 +864,10 @@
             </div>
 
             <!-- ── Inline formulář (nový / edit) ────────────────────── -->
-            <div x-show="scheduleForm !== null"
-                 class="bg-gray-900/70 border border-gray-700 rounded-xl p-4">
+            <!-- x-if místo x-show: bez otevřeného formuláře je scheduleForm null
+                 a vazby na jeho pole by házely chyby v konzoli. -->
+            <template x-if="scheduleForm">
+            <div class="bg-gray-900/70 border border-gray-700 rounded-xl p-4">
                 <div class="text-sm font-semibold text-gray-200 mb-4"
                      x-text="scheduleForm?.id ? '✏️ Upravit plán' : '➕ Nový plán'"></div>
 
@@ -1065,6 +1067,7 @@
                                    text-gray-300 transition-colors">Zrušit</button>
                 </div>
             </div>
+            </template>
         </div>
     </div>
 
@@ -1255,6 +1258,7 @@ document.addEventListener('alpine:init', () => {
         // ── Plány (HAND subtab) ───────────────────────────────────────
         schedules:          [],
         schedSettings:      {},
+        schedEnabled:       false,
         loadingSchedule:    false,
         scheduleError:      null,
         _scheduleLoaded:    false,
